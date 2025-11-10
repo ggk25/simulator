@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import pandas as pd
 import numpy as np
 import math
@@ -12,8 +13,7 @@ from software_model.MoE import Prefill as MoEPrefill, Decode as MoEDecode
 from software_model.FFN import Prefill as FFNPrefill, Decode as FFNDecode
 from software_model.MLA import Prefill as MLAPrefill, Decode as MLADecode
 # 保留原有的模型导入以确保兼容性
-from software_model.seed_oss import Prefill as SeedOssPrefill, Decode as SeedOssDecode
-from software_model.deepseek import Prefill as DeepseekPrefill, Decode as DeepseekDecode
+# 旧有的预定义模型导入已移除，统一使用灵活配置的模型
 from utils import DataType, Tensor, data_type_dict
 from hardware_model.device import device_dict
 from power import get_global_power_counter
@@ -170,505 +170,227 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     """
     micro_batch = batch_size / device.n_chip
     
-    if use_flexible_model:
-        # 使用灵活的模型配置
-        model_name = model_config.name
-        hidden_size = model_config.hidden_size
-        datatype = model_config.datatype
-        
-        # 收集prefill阶段数据
-        prompt = Tensor([micro_batch, prefill_lenth, hidden_size], data_type=datatype)
-        prefill_model = FlexibleModel(model_config, stage="prefill")
-        prefill_output = prefill_model(prompt)
-        prefill_operator_latency, prefill_latency, pipeline_latency = prefill_model.mapping_and_simulate(device)
-        # 时间序列：prefill 阶段
-        timeline_segments = []
-        layer_groups = math.ceil(model_config.layer_count/device.n_chip)
-        scale_factor = layer_groups * device.n_chip
-        time_cursor_ms = 0.0
-        for op in prefill_operator_latency:
-            op_name = op['operator']
-            cycles = op['总延时']
-            dur_ms = cycles / (device.frequency * 1e6) * 1e3 * scale_factor
-            timeline_segments.append({
-                '阶段': 'prefill',
-                '算子': op_name,
-                '开始时间(ms)': time_cursor_ms,
-                '结束时间(ms)': time_cursor_ms + dur_ms,
-                '持续时间(ms)': dur_ms,
-            })
-            time_cursor_ms += dur_ms
-        # pipeline 作为单独段（功耗后续设为0）
-        if pipeline_latency and pipeline_latency > 0:
-            dur_ms = (pipeline_latency) / (device.frequency * 1e6) * 1e3 * device.n_chip
-            timeline_segments.append({
-                '阶段': 'prefill',
-                '算子': 'pipeline',
-                '开始时间(ms)': time_cursor_ms,
-                '结束时间(ms)': time_cursor_ms + dur_ms,
-                '持续时间(ms)': dur_ms,
-            })
-        
-        # 计算TTFT (Time To First Token)
-        prefill_latency_ms = (prefill_latency * math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3
-        ttft = prefill_latency_ms * device.n_chip
+    # 统一走灵活模型路径（自定义 JSON 配置）
+    model_name = model_config.name
+    hidden_size = model_config.hidden_size
+    datatype = model_config.datatype
 
-        # 处理prefill阶段数据,单层在单芯片上的延迟数据
-        prefill_data = []
-        total_prefill_compute = sum(op['计算延时'] for op in prefill_operator_latency)
-        total_prefill_comm = sum(op['通信延时'] for op in prefill_operator_latency)
-        total_prefill = total_prefill_compute + total_prefill_comm
+    # 收集prefill阶段数据
+    prompt = Tensor([micro_batch, prefill_lenth, hidden_size], data_type=datatype)
+    prefill_model = FlexibleModel(model_config, stage="prefill")
+    prefill_output = prefill_model(prompt)
+    prefill_operator_latency, prefill_latency, pipeline_latency = prefill_model.mapping_and_simulate(device)
+    
+    # 计算TTFT (Time To First Token)
+    prefill_latency_ms = (prefill_latency * math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3 #单芯片prefill某几层的延时
+    ttft = prefill_latency_ms * device.n_chip
+
+    # 处理prefill阶段数据,单层在单芯片上的延迟数据
+    prefill_data = []
+    total_prefill_compute = sum(op['计算延时'] for op in prefill_operator_latency)
+    total_prefill_comm = sum(op['通信延时'] for op in prefill_operator_latency)
+    total_prefill = total_prefill_compute + total_prefill_comm
+    
+    # 转换为ms单位，乘device.n_chip是因为总共device.n_chip个芯片
+    total_prefill_compute_ms = (total_prefill_compute / (device.frequency * 1e6) * 1e3)* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
+    total_prefill_comm_ms = (total_prefill_comm* math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+    total_prefill_ms = (total_prefill* math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+    
+    for op in prefill_operator_latency:
+        op_name = op['operator']
+        total = op['总延时']
         
-        # 转换为ms单位，乘device.n_chip是因为总共device.n_chip个芯片
-        total_prefill_compute_ms = (total_prefill_compute / (device.frequency * 1e6) * 1e3)* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
-        total_prefill_comm_ms = (total_prefill_comm* math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_prefill_ms = (total_prefill* math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+        # 转换为ms单位
+        total_ms = total / (device.frequency * 1e6) * 1e3* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
         
-        for op in prefill_operator_latency:
-            op_name = op['operator']
-            total = op['总延时']
-            
-            # 转换为ms单位
-            total_ms = total / (device.frequency * 1e6) * 1e3* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
-            
-            # 计算算子占总延时的比例
-            op_ratio = total / total_prefill if total_prefill > 0 else 0
-            
-            prefill_data.append({
-                '模型': model_name,
-                '阶段': 'prefill',
-                '算子': op_name,
-                '总延时(ms)': total_ms,
-                '算子占总延时比例': op_ratio
-            })
+        # 计算算子占总延时的比例
+        op_ratio = total / total_prefill if total_prefill > 0 else 0
         
-        # 添加prefill阶段汇总行
         prefill_data.append({
             '模型': model_name,
             '阶段': 'prefill',
-            '算子': '汇总',
-            '计算延时(ms)': total_prefill_compute_ms,
-            '通信延时(ms)': total_prefill_comm_ms,
-            '总延时(ms)': total_prefill_ms,
-            '计算延时占比': total_prefill_compute / total_prefill if total_prefill > 0 else 0,
-            '通信延时占比': total_prefill_comm / total_prefill if total_prefill > 0 else 0,
-            'TTFT(s)': ttft/1000
+            '算子': op_name,
+            '总延时(ms)': total_ms,
+            '算子占总延时比例': op_ratio
         })
+    
+    # 添加prefill阶段汇总行
+    prefill_data.append({
+        '模型': model_name,
+        '阶段': 'prefill',
+        '算子': '汇总',
+        '计算延时(ms)': total_prefill_compute_ms,
+        '通信延时(ms)': total_prefill_comm_ms,
+        '总延时(ms)': total_prefill_ms,
+        '计算延时占比': total_prefill_compute / total_prefill if total_prefill > 0 else 0,
+        '通信延时占比': total_prefill_comm / total_prefill if total_prefill > 0 else 0,
+        'TTFT(s)': ttft/1000
+    })
+    
+    # 收集decode阶段数据
+    decode_data = []
+    # 用于累积每个算子的延时
+    op_total = {}
+    
+    total_decode_compute = 0
+    total_decode_comm = 0
+    total_decode = 0
+    total_pipeline_latency = 0
+    
+    # 收集所有decode步骤的数据 (1到decode_lenth)
+    for i in range(1, decode_lenth + 1):
+        context_lenth = prefill_lenth + i
+        decode_model = FlexibleModel(model_config, stage="decode", context_length=context_lenth)
+        input = Tensor([micro_batch, 1, hidden_size], data_type=datatype)
+        output = decode_model(input)
+        decode_operator_latency, decode_latency, pipeline_latency = decode_model.mapping_and_simulate(device)
         
-        # 收集decode阶段数据
-        decode_data = []
-        # 用于累积每个算子的延时
-        op_total = {}
+        # 累加当前步骤的延时
+        step_compute = sum(op['计算延时'] for op in decode_operator_latency)
+        step_comm = sum(op['通信延时'] for op in decode_operator_latency)
+        step_total = step_compute + step_comm
         
-        total_decode_compute = 0
-        total_decode_comm = 0
-        total_decode = 0
-        total_pipeline_latency = 0
+        total_decode_compute += step_compute
+        total_decode_comm += step_comm
+        total_pipeline_latency += pipeline_latency
+        total_decode += step_total
         
-        # 收集所有decode步骤的数据 (1到decode_lenth)
-        for i in range(1, decode_lenth + 1):
-            context_lenth = prefill_lenth + i
-            decode_model = FlexibleModel(model_config, stage="decode", context_length=context_lenth)
-            input = Tensor([micro_batch, 1, hidden_size], data_type=datatype)
-            output = decode_model(input)
-            decode_operator_latency, decode_latency, pipeline_latency = decode_model.mapping_and_simulate(device)
-            # 时间序列：decode 第 i 步
-            time_cursor_ms = 0.0 if i == 1 else timeline_segments[-1]['结束时间(ms)']
-            for op in decode_operator_latency:
-                op_name = op['operator']
-                cycles = op['总延时']
-                dur_ms = cycles / (device.frequency * 1e6) * 1e3 * scale_factor
-                start = time_cursor_ms
-                end = start + dur_ms
-                timeline_segments.append({
-                    '阶段': f'decode_step_{i}',
-                    '算子': op_name,
-                    '开始时间(ms)': start,
-                    '结束时间(ms)': end,
-                    '持续时间(ms)': dur_ms,
-                })
-                time_cursor_ms = end
-            if pipeline_latency and pipeline_latency > 0:
-                dur_ms = (pipeline_latency) / (device.frequency * 1e6) * 1e3 * device.n_chip
-                start = time_cursor_ms
-                end = start + dur_ms
-                timeline_segments.append({
-                    '阶段': f'decode_step_{i}',
-                    '算子': 'pipeline',
-                    '开始时间(ms)': start,
-                    '结束时间(ms)': end,
-                    '持续时间(ms)': dur_ms,
-                })
-            
-            # 累加当前步骤的延时
-            step_compute = sum(op['计算延时'] for op in decode_operator_latency)
-            step_comm = sum(op['通信延时'] for op in decode_operator_latency)
-            step_total = step_compute + step_comm
-            
-            total_decode_compute += step_compute
-            total_decode_comm += step_comm
-            total_pipeline_latency += pipeline_latency
-            total_decode += step_total
-            
-            # 累加每个算子的延时
-            for op in decode_operator_latency:
-                op_name = op['operator']
-                total = op['总延时']
-                
-                if op_name not in op_total:
-                    op_total[op_name] = 0
-                
-                op_total[op_name] += total
-        
-        # 转换为ms单位
-        total_decode_compute_ms = total_decode_compute * math.ceil(model_config.layer_count/device.n_chip) / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_decode_comm_ms = (total_decode_comm * math.ceil(model_config.layer_count/device.n_chip) + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_decode_ms = (total_decode* math.ceil(model_config.layer_count/device.n_chip) + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-        
-        # 计算端对端吞吐率
-        throughput = batch_size * decode_lenth * 1e3 / (total_decode_ms + total_prefill_ms)
-        TBT = total_decode_ms / decode_lenth
-        
-        # 处理decode阶段每个算子的累积数据
-        for op_name in op_total:
-            total = op_total[op_name]
-            
-            # 转换为ms单位
-            total_ms = total / (device.frequency * 1e6) * 1e3* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
-            
-            # 计算算子占总延时的比例
-            op_ratio = total / total_decode if total_decode > 0 else 0
-            
-            decode_data.append({
-                '模型': model_name,
-                '阶段': 'decode',
-                '算子': op_name,
-                '总延时(ms)': total_ms,
-                '算子占总延时比例': op_ratio
-            })
-        
-        # 添加decode阶段汇总行
-        decode_data.append({
-            '模型': model_name,
-            '阶段': 'decode',
-            '算子': '汇总',
-            '计算延时(ms)': total_decode_compute_ms,
-            '通信延时(ms)': total_decode_comm_ms,
-            '总延时(ms)': total_decode_ms,
-            '计算延时占比': total_decode_compute / total_decode if total_decode > 0 else 0,
-            '通信延时占比': total_decode_comm / total_decode if total_decode > 0 else 0,
-            '吞吐率(tokens/s)': throughput,
-            '生成速度(tokens/s)':1000/TBT
-        })
-        
-        # 合并数据，将prefill和decode的汇总行分别放在各自部分的最后
-        # 先处理prefill数据，将汇总行放在最后
-        prefill_operators = [item for item in prefill_data if item.get('算子') != '汇总']
-        prefill_summary = [item for item in prefill_data if item.get('算子') == '汇总']
-        
-        # 再处理decode数据，将汇总行放在最后
-        decode_operators = [item for item in decode_data if item.get('算子') != '汇总']
-        decode_summary = [item for item in decode_data if item.get('算子') == '汇总']
-        
-        # 返回合并后的数据，汇总行分别放在prefill和decode部分的最后
-        return prefill_operators + prefill_summary + [{}] + [{}] + decode_operators + decode_summary, timeline_segments
-    else:
-        # 使用原有的模型类，保持向后兼容
-        model_name = model_config['name']
-        prefill_class = model_config['prefill_class']
-        decode_class = model_config['decode_class']
-        hidden_size = model_config['hidden_size']
-        datatype = model_config['datatype']
-        
-        # 收集prefill阶段数据
-        prompt = Tensor([micro_batch, prefill_lenth, hidden_size], data_type=datatype)
-        prefill = prefill_class(datatype=datatype)
-        prefill_output = prefill(prompt)
-        prefill_operator_latency, prefill_latency ,pipeline_latency= prefill.mapping_and_simulate(device)
-        timeline_segments = []
-        time_cursor_ms = 0.0
-        # 原模型：每芯片两层，算子时长按 2*32，pipeline 按 32
-        for op in prefill_operator_latency:
-            op_name = op['operator']
-            cycles = op['总延时']
-            dur_ms = cycles / (device.frequency * 1e6) * 1e3 * math.ceil(model_config.layer_count/device.n_chip) * device.n_chip
-            timeline_segments.append({
-                '阶段': 'prefill',
-                '算子': op_name,
-                '开始时间(ms)': time_cursor_ms,
-                '结束时间(ms)': time_cursor_ms + dur_ms,
-                '持续时间(ms)': dur_ms,
-            })
-            time_cursor_ms += dur_ms
-        if pipeline_latency and pipeline_latency > 0:
-            dur_ms = (pipeline_latency) / (device.frequency * 1e6) * 1e3 * device.n_chip
-            timeline_segments.append({
-                '阶段': 'prefill',
-                '算子': 'pipeline',
-                '开始时间(ms)': time_cursor_ms,
-                '结束时间(ms)': time_cursor_ms + dur_ms,
-                '持续时间(ms)': dur_ms,
-            })
-        
-        # 计算TTFT (Time To First Token)
-        prefill_latency_ms = (prefill_latency * 2 + pipeline_latency) / (device.frequency * 1e6) * 1e3
-        ttft = prefill_latency_ms * device.n_chip
-        
-        # 处理prefill阶段数据
-        prefill_data = []
-        total_prefill_compute = sum(op['计算延时'] for op in prefill_operator_latency)
-        total_prefill_comm = sum(op['通信延时'] for op in prefill_operator_latency)
-        total_prefill = total_prefill_compute + total_prefill_comm
-        
-        # 转换为ms单位,乘2是因为每个芯片处理2层，两层需要一次peer to peer的通信，乘32是因为总共32个芯片
-        total_prefill_compute_ms = (total_prefill_compute / (device.frequency * 1e6) * 1e3)*math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
-        total_prefill_comm_ms = (total_prefill_comm*math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_prefill_ms = (total_prefill*math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-
-        for op in prefill_operator_latency:
+        # 累加每个算子的延时
+        for op in decode_operator_latency:
             op_name = op['operator']
             total = op['总延时']
             
-            # 转换为ms单位
-            total_ms = total / (device.frequency * 1e6) * 1e3*math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
+            if op_name not in op_total:
+                op_total[op_name] = 0
             
-            # 计算算子占总延时的比例
-            op_ratio = total / total_prefill if total_prefill > 0 else 0
-            
-            prefill_data.append({
-                '模型': model_name,
-                '阶段': 'prefill',
-                '算子': op_name,
-                '总延时(ms)': total_ms,
-                '算子占总延时比例': op_ratio
-            })
-        
-        # 添加prefill阶段汇总行
-        prefill_data.append({
-            '模型': model_name,
-            '阶段': 'prefill',
-            '算子': '汇总',
-            '计算延时(ms)': total_prefill_compute_ms,
-            '通信延时(ms)': total_prefill_comm_ms,
-            '总延时(ms)': total_prefill_ms,
-            '计算延时占比': total_prefill_compute / total_prefill if total_prefill > 0 else 0,
-            '通信延时占比': total_prefill_comm / total_prefill if total_prefill > 0 else 0,
-            'TTFT(s)': ttft/1000
-        })
-        
-        # 收集decode阶段数据
-        decode_data = []
-        # 用于累积每个算子的延时
-        op_total = {}
-        
-        total_decode_compute = 0
-        total_decode_comm = 0
-        total_decode = 0
-        total_pipeline_latency = 0
-        
-        # 收集所有decode步骤的数据 (1到decode_lenth)
-        for i in range(1, decode_lenth + 1):
-            context_lenth = prefill_lenth + i
-            decode = decode_class(datatype=datatype, context_lenth=context_lenth)
-            input = Tensor([micro_batch, 1, hidden_size], data_type=datatype)
-            output = decode(input)
-            decode_operator_latency, decode_latency, pipeline_latency = decode.mapping_and_simulate(device)
-            # 时间序列：decode 第 i 步
-            time_cursor_ms = timeline_segments[-1]['结束时间(ms)'] if len(timeline_segments) > 0 else 0.0
-            for op in decode_operator_latency:
-                op_name = op['operator']
-                cycles = op['总延时']
-                dur_ms = cycles / (device.frequency * 1e6) * 1e3 * math.ceil(model_config.layer_count/device.n_chip) * device.n_chip
-                start = time_cursor_ms
-                end = start + dur_ms
-                timeline_segments.append({
-                    '阶段': f'decode_step_{i}',
-                    '算子': op_name,
-                    '开始时间(ms)': start,
-                    '结束时间(ms)': end,
-                    '持续时间(ms)': dur_ms,
-                })
-                time_cursor_ms = end
-            if pipeline_latency and pipeline_latency > 0:
-                dur_ms = (pipeline_latency) / (device.frequency * 1e6) * 1e3 * device.n_chip
-                start = time_cursor_ms
-                end = start + dur_ms
-                timeline_segments.append({
-                    '阶段': f'decode_step_{i}',
-                    '算子': 'pipeline',
-                    '开始时间(ms)': start,
-                    '结束时间(ms)': end,
-                    '持续时间(ms)': dur_ms,
-                })
-            
-            # 累加当前步骤的延时
-            step_compute = sum(op['计算延时'] for op in decode_operator_latency)
-            step_comm = sum(op['通信延时'] for op in decode_operator_latency)
-            step_total = step_compute + step_comm
-            
-            total_decode_compute += step_compute
-            total_decode_comm += step_comm
-            total_pipeline_latency += pipeline_latency
-            total_decode += step_total
-            
-            # 累加每个算子的延时
-            for op in decode_operator_latency:
-                op_name = op['operator']
-                total = op['总延时']
-                
-                if op_name not in op_total:
-                    op_total[op_name] = 0
-                
-                op_total[op_name] += total
+            op_total[op_name] += total
+    
+    # 转换为ms单位
+    total_decode_compute_ms = total_decode_compute * math.ceil(model_config.layer_count/device.n_chip) / (device.frequency * 1e6) * 1e3*device.n_chip
+    total_decode_comm_ms = (total_decode_comm * math.ceil(model_config.layer_count/device.n_chip) + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+    total_decode_ms = (total_decode* math.ceil(model_config.layer_count/device.n_chip) + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+    
+    # 计算端对端吞吐率
+    throughput = batch_size * decode_lenth * 1e3 / (total_decode_ms + total_prefill_ms)
+    TBT = total_decode_ms / decode_lenth
+    
+    # 处理decode阶段每个算子的累积数据
+    for op_name in op_total:
+        total = op_total[op_name]
         
         # 转换为ms单位
-        total_decode_compute_ms = total_decode_compute * 2 / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_decode_comm_ms = (total_decode_comm*2 + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
-        total_decode_ms = (total_decode * 2 + total_pipeline_latency) / (device.frequency * 1e6) * 1e3*device.n_chip
+        total_ms = total / (device.frequency * 1e6) * 1e3* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
         
-        # 计算端对端吞吐率
-        throughput = batch_size * decode_lenth * 1e3 / (total_decode_ms + total_prefill_ms)
-        TBT = total_decode_ms / decode_lenth
+        # 计算算子占总延时的比例
+        op_ratio = total / total_decode if total_decode > 0 else 0
         
-        # 处理decode阶段每个算子的累积数据
-        for op_name in op_total:
-            total = op_total[op_name]
-            
-            # 转换为ms单位
-            total_ms = total / (device.frequency * 1e6) * 1e3*math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
-            
-            # 计算算子占总延时的比例
-            op_ratio = total / total_decode if total_decode > 0 else 0
-            
-            decode_data.append({
-                '模型': model_name,
-                '阶段': 'decode',
-                '算子': op_name,
-                '总延时(ms)': total_ms,
-                '算子占总延时比例': op_ratio
-            })
-        
-        # 添加decode阶段汇总行
         decode_data.append({
             '模型': model_name,
             '阶段': 'decode',
-            '算子': '汇总',
-            '计算延时(ms)': total_decode_compute_ms,
-            '通信延时(ms)': total_decode_comm_ms,
-            '总延时(ms)': total_decode_ms,
-            '计算延时占比': total_decode_compute / total_decode if total_decode > 0 else 0,
-            '通信延时占比': total_decode_comm / total_decode if total_decode > 0 else 0,
-            '吞吐率(tokens/s)': throughput,
-            '生成速度(tokens/s)':1000/TBT
+            '算子': op_name,
+            '总延时(ms)': total_ms,
+            '算子占总延时比例': op_ratio
         })
-        
-        # 合并数据，将prefill和decode的汇总行分别放在各自部分的最后
-        # 先处理prefill数据，将汇总行放在最后
-        prefill_operators = [item for item in prefill_data if item.get('算子') != '汇总']
-        prefill_summary = [item for item in prefill_data if item.get('算子') == '汇总']
-        
-        # 再处理decode数据，将汇总行放在最后
-        decode_operators = [item for item in decode_data if item.get('算子') != '汇总']
-        decode_summary = [item for item in decode_data if item.get('算子') == '汇总']
-        
-        # 返回合并后的数据，汇总行分别放在prefill和decode部分的最后
-        return prefill_operators + prefill_summary + [{}] + [{}] + decode_operators + decode_summary, timeline_segments
+    
+    # 添加decode阶段汇总行
+    decode_data.append({
+        '模型': model_name,
+        '阶段': 'decode',
+        '算子': '汇总',
+        '计算延时(ms)': total_decode_compute_ms,
+        '通信延时(ms)': total_decode_comm_ms,
+        '总延时(ms)': total_decode_ms,
+        '计算延时占比': total_decode_compute / total_decode if total_decode > 0 else 0,
+        '通信延时占比': total_decode_comm / total_decode if total_decode > 0 else 0,
+        '吞吐率(tokens/s)': throughput,
+        '生成速度(tokens/s)':1000/TBT
+    })
+    
+    # 合并数据，将prefill和decode的汇总行分别放在各自部分的最后
+    # 先处理prefill数据，将汇总行放在最后
+    prefill_operators = [item for item in prefill_data if item.get('算子') != '汇总']
+    prefill_summary = [item for item in prefill_data if item.get('算子') == '汇总']
+    
+    # 再处理decode数据，将汇总行放在最后
+    decode_operators = [item for item in decode_data if item.get('算子') != '汇总']
+    decode_summary = [item for item in decode_data if item.get('算子') == '汇总']
+    
+    # 返回合并后的数据，汇总行分别放在prefill和decode部分的最后
+    return prefill_operators + prefill_summary + [{}] + [{}] + decode_operators + decode_summary
 
+
+def _load_json_configs(config_path):
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"未找到配置文件: {config_path}")
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    # 支持单模型或列表
+    if isinstance(data, dict):
+        data = [data]
+    return data
+
+def _build_model_config(entry):
+    # 运行参数(非模型结构)提取并返回 (batch_size, prefill_lenth, decode_lenth, device_name)
+    runtime = {
+        'batch_size': entry.pop('batch_size', 256),
+        'prefill_lenth': entry.pop('prefill_length', entry.pop('prefill_lenth', 1024)),
+        'decode_lenth': entry.pop('decode_length', entry.pop('decode_lenth', 2048)),
+        'device_name': entry.pop('device', 'D37x')
+    }
+    # datatype 字符串转换
+    dt = entry.get('datatype', 'fp8')
+    entry['datatype'] = data_type_dict.get(dt, data_type_dict['fp8'])
+    model_cfg = ModelConfig(**entry)
+    return model_cfg, runtime
 
 def main():
-    # 配置参数
-    device = device_dict["D37x"]
-    batch_size = 256
-    prefill_lenth = 1024
-    decode_lenth = 2048
-    datatype = data_type_dict["fp8"]
-    
-    # 预定义模型配置
-    model_configs = []
-    
-    # 1. 原有的seed_oss模型配置 (GQA + FFN)
-    seed_oss_config = {
-        'name': 'seed_oss',
-        'prefill_class': SeedOssPrefill,
-        'decode_class': SeedOssDecode,
-        'hidden_size': 5120,
-        'datatype': datatype
-    }
-    
-    # 2. 原有的deepseek模型配置 (MLA + MoE)
-    deepseek_config = {
-        'name': 'deepseek',
-        'prefill_class': DeepseekPrefill,
-        'decode_class': DeepseekDecode,
-        'hidden_size': 7168,
-        'datatype': datatype
-    }
-    
-    # 3. 使用新的灵活配置系统定义模型
-    model = ModelConfig(
-        name="seedoss",
-        attention_type="GQA",
-        ffn_type="FFN",
-        hidden_size=5120,
-        head_dim=128,
-        num_attention_heads=80,
-        num_key_value_heads=8,
-        ffn_intermediate_size=27648,
-        datatype=datatype
-    )
-    
-    # 添加到模型配置列表
-    model_configs.extend([
-        model,
-    ])
-    
+    # JSON 配置文件路径（位于当前目录）
+    config_path = os.path.join(os.path.dirname(__file__), 'model_config.json')
+    try:
+        raw_entries = _load_json_configs(config_path)
+    except Exception as e:
+        print(f"加载配置失败: {e}\n使用内置默认模型。可创建 {config_path} 进行自定义。")
+        raw_entries = [{
+            'name': 'seedoss', 'attention_type': 'GQA', 'ffn_type': 'FFN', 'hidden_size': 5120,
+            'head_dim':128,'num_attention_heads':80,'num_key_value_heads':8,'ffn_intermediate_size':27648,
+            'layer_count':64,'datatype':'fp8','batch_size':256,'prefill_length':1024,'decode_length':2048,
+            'device':'D37x'
+        }]
+
     # 收集所有模型的数据
     all_data = []
-    summary_data = []  # 用于存储汇总数据
-    
-    for config in model_configs:
-        if isinstance(config, ModelConfig):
-            # 使用新的灵活配置系统
-            print(f"正在收集模型 {config.name} 的数据...")
-            model_data, timeline_segments = collect_model_data(
-                config,
-                device=device,
-                batch_size=batch_size,
-                prefill_lenth=prefill_lenth,
-                decode_lenth=decode_lenth,
-                use_flexible_model=True
-            )
-        else:
-            # 使用原有的模型配置
-            print(f"正在收集模型 {config['name']} 的数据...")
-            model_data, timeline_segments = collect_model_data(
-                config,
-                device=device,
-                batch_size=batch_size,
-                prefill_lenth=prefill_lenth,
-                decode_lenth=decode_lenth,
-                use_flexible_model=False
-            )
-        
+    summary_data = []
+
+    for entry in raw_entries:
+        # 复制以避免修改原数据
+        entry_copy = dict(entry)
+        model_cfg, runtime = _build_model_config(entry_copy)
+        device = device_dict.get(runtime['device_name'], device_dict['D37x'])
+        batch_size = runtime['batch_size']
+        prefill_lenth = runtime['prefill_lenth']
+        decode_lenth = runtime['decode_lenth']
+        print(f"[配置] 模型={model_cfg.name} device={runtime['device_name']} batch={batch_size} prefill={prefill_lenth} decode={decode_lenth}")
+
+        model_data = collect_model_data(
+            model_cfg,
+            device=device,
+            batch_size=batch_size,
+            prefill_lenth=prefill_lenth,
+            decode_lenth=decode_lenth,
+            use_flexible_model=True
+        )
         all_data.extend(model_data)
-        
-        # 提取汇总数据
-        model_name = config.name if isinstance(config, ModelConfig) else config['name']
-        
-        # 找到prefill和decode的汇总行
+
         prefill_summary = None
         decode_summary = None
-        
         for item in model_data:
             if item.get('算子') == '汇总' and item.get('阶段') == 'prefill':
                 prefill_summary = item
             elif item.get('算子') == '汇总' and item.get('阶段') == 'decode':
                 decode_summary = item
-        
-        # 添加到汇总数据
         if prefill_summary and decode_summary:
             summary_data.append({
-                '模型': model_name,
+                '模型': model_cfg.name,
                 '首词延迟(TTFT)(s)': prefill_summary.get('TTFT(s)', 0),
                 '总延时(ms)': prefill_summary.get('总延时(ms)', 0) + decode_summary.get('总延时(ms)', 0),
                 '吞吐率(tokens/s)': decode_summary.get('吞吐率(tokens/s)', 0),
@@ -687,9 +409,17 @@ def main():
     power_counter = get_global_power_counter()
     energy_results = power_counter.compute_energy(energy_table)
     # 能耗按层数×pipeline级数进行缩放（与延时一致）
+    # 根据输入包含的模型层数与芯片数估算缩放
     try:
-        # 仅适用于本脚本当前仅处理一个 ModelConfig 的情况
-        energy_scale = math.ceil(model.layer_count / device.n_chip) * device.n_chip
+        # 从汇总数据推导层数（取第一个模型配置的层数），如不可得则回退为1
+        first_layers = None
+        if isinstance(raw_entries, list) and len(raw_entries) > 0:
+            first_layers = raw_entries[0].get('layer_count', None) if isinstance(raw_entries[0], dict) else None
+        if first_layers is None and '层数' in df.columns:
+            first_layers = int(df['层数'].iloc[0])
+        if first_layers is None:
+            first_layers = 1
+        energy_scale = math.ceil(first_layers / device.n_chip) * device.n_chip
     except Exception:
         energy_scale = 1
     # 计算各算子累计时长（ms），用于算子平均功耗

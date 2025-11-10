@@ -247,18 +247,29 @@ class Prefill:
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
 
-        return total_latency, operator_latency
+        return operator_latency, total_latency
     
 class Decode:
-    def __init__(self, datatype: DataType ,context_lenth ,hiden_states=7168 ,experts_dim=2048, selected_expert_count=8 ,experts_count= 256):
+    def __init__(self, datatype: DataType ,context_lenth ,hiden_states=7168 ,q_compress_dim=1536 ,qk_rope_dim=64 ,kv_compress_dim=576,\
+                 n_heads=128 ,qkv_dim=128):
         
         self.datatype = datatype
         self.hiden_states = hiden_states
-        self.experts_dim = experts_dim
-        self.selected_expert_count = selected_expert_count
-        self.experts_count = experts_count
         self.context_lenth = context_lenth
+        self.q_compress_dim = q_compress_dim
+        self.qk_rope_dim = qk_rope_dim
+        self.kv_compress_dim = kv_compress_dim
+        self.n_heads = n_heads
+        self.qkv_dim = qkv_dim
 
+        #MLA中的权重
+        self.hiden_states = hiden_states
+        self.WDQ = Tensor([hiden_states ,q_compress_dim],datatype)
+        self.WDKV = Tensor([hiden_states ,kv_compress_dim],datatype)
+        self.WUQ = Tensor([q_compress_dim ,(qkv_dim + qk_rope_dim)*n_heads],datatype)
+        self.WUKT = Tensor([n_heads ,qkv_dim ,kv_compress_dim-qk_rope_dim],datatype)
+        self.WUV = Tensor([n_heads, kv_compress_dim - qk_rope_dim ,qkv_dim],datatype)
+        self.W_o = Tensor([qkv_dim * n_heads ,hiden_states])
         # MLA
         self.rmsnorm_mla = rmsnorm(datatype)   #RMSNorm
         self.linear_qa = matmul(datatype)  #linear(q_a)
@@ -475,5 +486,5 @@ class Decode:
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
 
-        return total_latency, operator_latency
+        return operator_latency, total_latency
     

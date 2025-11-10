@@ -1,0 +1,23 @@
+{
+  "name": "deepseek671b",
+  "attention_type": "MLA",
+  "ffn_type": "MoE",
+  "hidden_size": 7168,
+  "layer_count": 61,
+  "datatype": "fp8",
+
+  "q_compress_dim": 1536,
+  "qk_rope_dim": 64,
+  "kv_compress_dim": 576,
+  "n_heads": 128,
+  "qkv_dim": 128,
+  "experts_dim": 2048,
+  "shared_experts_count": 1,
+  "selected_expert_count": 8,
+  "experts_count": 256,
+
+  "batch_size": 256,
+  "prefill_length": 1024,
+  "decode_length": 2048,
+  "device": "D37x"
+}
