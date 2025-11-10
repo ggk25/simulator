@@ -1,0 +1,26 @@
+performance model/
+├── gui_interface.py
+├── hardware_model/
+│   ├── communication.py
+│   ├── compute_module.py
+│   ├── device.py
+│   └── memory_module.py
+├── model_inference/
+│   ├── gui_model_config.py
+│   ├── model_inference.py
+├── power/
+│   ├── __init__.py
+│   ├── energy_table.py
+│   └── power_counter.py
+├── software_model/
+│   ├── communication.py
+│   ├── deepseek.py
+│   ├── FFN.py
+│   ├── gemm.py
+│   ├── GQA.py
+│   ├── misc.py
+│   ├── MLA.py
+│   ├── MoE.py
+│   ├── non_gemm.py
+│   └── seed_oss.py
+

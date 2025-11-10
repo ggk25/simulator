@@ -1,0 +1,10 @@
+for n in range(n.begin,n.end,32):
+    for k in range(k.begin,k.end,32):
+        LOAD B_tile(k~k+32,n~n+32) from DRAM to systolic array  #从DRAM中load权重
+        for m in range(m.begin,m.end,1):
+            LOAD A_tile(m,k~k+32) from buffer to systolic array #从buffer中load输入
+            GEMV A_tile,B_tile to C_tile(m,n~n+32)
+            if(k+32)<k.end:
+                LOAD old_C_tile(m,n~n+32) from buffer to vector processor   #从buffer中load上一轮的输出
+                C_tile += old_C_tile                         #沿k维度reduce
+            STORE C_tile to buffer

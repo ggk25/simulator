@@ -1,0 +1,11 @@
+{
+  "mac4_pj": 0.523,
+  "mac8_pj": 0.872,
+  "mac16_pj": 2.873,
+  "mac32_pj": 5.746,
+  "eltwise_energy_pj": 15.9,
+  "noc_energy_pj_per_bit_per_hop": 0.61,
+  "pcie_energy_pj_per_bit": 8.4,
+  "dram_energy_pj_per_bit": 1,
+  "sram_energy_pj_per_32b": 5
+}
