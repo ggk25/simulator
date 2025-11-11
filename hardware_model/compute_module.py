@@ -9,10 +9,12 @@ class VectorUnit:
 		cycle_per_reciprocal, # cycles per reciprocal instruction
 		cycle_per_reciprocal_sqrt, # cycles per reciprocal_square_root instruction
 		cycle_per_vector_loop, # cycles per vector loop
+        cycle_per_vector_ldst, # cycles per vector load/store
         vector_width, # vector width
         data_type=data_type_dict["fp32"],
     ):
         self.word_size = word_size  # Byte
+        self.cycle_per_vector_ldst = cycle_per_vector_ldst
         self.cycle_per_exp = cycle_per_exp  
         self.cycle_per_reciprocal = cycle_per_reciprocal
         self.cycle_per_reciprocal_sqrt = cycle_per_reciprocal_sqrt
@@ -22,7 +24,7 @@ class VectorUnit:
 
 
 vector_unit_dict = {
-    "D37x": VectorUnit(4, 15, 12, 15, 2, 32),
+    "D37x": VectorUnit(word_size=4, cycle_per_exp=15, cycle_per_reciprocal=12, cycle_per_reciprocal_sqrt=15, cycle_per_vector_loop=1, cycle_per_vector_ldst=2, vector_width=32),
 }
 
 class SystolicArray:
@@ -42,7 +44,7 @@ class SystolicArray:
 
 
 systolic_array_dict = {
-    "D37x": SystolicArray(32, 32, 1, 1, 4),
+    "D37x": SystolicArray(array_height=32, array_width=32, mac_per_cycle=1, input_word_size=1, output_word_size=4),
 }
 
 class compute_module:

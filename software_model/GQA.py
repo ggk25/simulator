@@ -12,6 +12,8 @@ from .non_gemm import rmsnorm , rope , element_wise_mul_add , softmax , sigmoid 
 from .misc import quantization ,reshape ,split ,transpose ,Concat
 from .communication import reduce_multicast ,multicast ,concat ,scatter, p2p
 import math
+from power import get_global_power_counter
+from power.energy_table import load_energy_table
 
 class Prefill():
     def __init__(self, datatype: DataType, hidden_size=5120, head_dim=128, \
@@ -69,107 +71,154 @@ class Prefill():
     def mapping_and_simulate(self, device:Device):
         #attention
         operator_latency = []
+        operator_energy = []
         total_latency = 0
+        counter = get_global_power_counter()
+        energy_table = load_energy_table()
 
         # attn_rmsnorm
         output_datasize = size(self.attn_rmsnorm.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.attn_rmsnorm.mapping_and_simulate(device)
         communication_latency = reduce_multicast(device) + multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "attn_rmsnorm", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "attn_rmsnorm", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # Q_proj
         output_datasize = size(self.Q_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.Q_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "Q_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "Q_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # Q_rope
         output_datasize = size(self.Q_rope.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.Q_rope.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "Q_rope", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "Q_rope", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # K_proj
         output_datasize = size(self.K_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.K_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "K_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "K_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # K_rope
         output_datasize = size(self.K_rope.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.K_rope.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "K_rope", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "K_rope", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # V_proj
         output_datasize = size(self.V_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.V_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "V_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "V_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # QKT
         output_datasize = size(self.QKT.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.QKT.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "QKT", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "QKT", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # softmax
         output_datasize = size(self.softmax.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.softmax.mapping_and_simulate(device)
         communication_latency = reduce_multicast(device) +multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "softmax", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "softmax", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # SV
         output_datasize = size(self.SV.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.SV.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency    
         operator_latency_dict = {'operator': "SV", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "SV", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # O_proj
         output_datasize = size(self.O_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.O_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "O_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "O_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # attn_resadd
         output_datasize = size(self.attn_resadd.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.attn_resadd.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "attn_resadd", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
-
+        operator_energy.append({'operator': "attn_resadd", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
+        self.operator_energy = operator_energy
         return operator_latency, total_latency
     
 class Decode():
@@ -236,105 +285,152 @@ class Decode():
     def mapping_and_simulate(self, device:Device):
         #attention
         operator_latency = []
+        operator_energy = []
         total_latency = 0
+        counter = get_global_power_counter()
+        energy_table = load_energy_table()
 
         # attn_rmsnorm
         output_datasize = size(self.attn_rmsnorm.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.attn_rmsnorm.mapping_and_simulate(device)
         communication_latency = reduce_multicast(device) + multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "attn_rmsnorm", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "attn_rmsnorm", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # Q_proj
         output_datasize = size(self.Q_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.Q_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "Q_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "Q_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # Q_rope
         output_datasize = size(self.Q_rope.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.Q_rope.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "Q_rope", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "Q_rope", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # K_proj
         output_datasize = size(self.K_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.K_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "K_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "K_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # K_rope
         output_datasize = size(self.K_rope.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.K_rope.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "K_rope", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "K_rope", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
         
         # V_proj
         output_datasize = size(self.V_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.V_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "V_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "V_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # QKT
         output_datasize = size(self.QKT.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.QKT.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "QKT", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "QKT", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # softmax
         output_datasize = size(self.softmax.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.softmax.mapping_and_simulate(device)
         communication_latency = reduce_multicast(device) +multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "softmax", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "softmax", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # SV
         output_datasize = size(self.SV.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.SV.mapping_and_simulate(device)
         communication_latency = multicast(device, output_datasize)
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency    
         operator_latency_dict = {'operator': "SV", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "SV", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # O_proj
         output_datasize = size(self.O_proj.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.O_proj.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "O_proj", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
+        operator_energy.append({'operator': "O_proj", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
 
         # attn_resadd
         output_datasize = size(self.attn_resadd.output_shape) * self.datatype.word_size
+        energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
         compute_latency = self.attn_resadd.mapping_and_simulate(device)
         communication_latency = 0
+        energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
+        energy_delta = energy_after - energy_before
         total_latency += compute_latency + communication_latency
         operator_latency_dict = {'operator': "attn_resadd", '计算延时':compute_latency ,\
                                  '通信延时':communication_latency, '总延时':compute_latency + communication_latency}
         operator_latency.append(operator_latency_dict)
-
+        operator_energy.append({'operator': "attn_resadd", '总延时': compute_latency + communication_latency, '能耗': energy_delta})
+        self.operator_energy = operator_energy
         return operator_latency, total_latency

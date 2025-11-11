@@ -21,6 +21,8 @@ class EnergyTable:
     dram_energy_pj_per_bit: float = 0.0
     # SRAM access energy per 32-bit access
     sram_energy_pj_per_32b: float = 0.0
+    # SRAM leakage power in Watts (W)
+    sram_leakage_power: float = 0.0
 
 
 def load_energy_table(config_path: Optional[str] = None) -> EnergyTable:
@@ -43,6 +45,7 @@ def load_energy_table(config_path: Optional[str] = None) -> EnergyTable:
                 pcie_energy_pj_per_bit=float(data.get("pcie_energy_pj_per_bit", 0.0)),
                 dram_energy_pj_per_bit=float(data.get("dram_energy_pj_per_bit", 0.0)),
                 sram_energy_pj_per_32b=float(data.get("sram_energy_pj_per_32b", 0.0)),
+                sram_leakage_power=float(data.get("sram_leakage_power", 0.0)),
             )
         except Exception:
             # fall back to defaults if parsing failed

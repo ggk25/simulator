@@ -174,12 +174,18 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     model_name = model_config.name
     hidden_size = model_config.hidden_size
     datatype = model_config.datatype
+    energy_table_local = load_energy_table()
+    sram_leakage_w_total = float(getattr(energy_table_local, 'sram_leakage_power', 0.0))
 
     # 收集prefill阶段数据
     prompt = Tensor([micro_batch, prefill_lenth, hidden_size], data_type=datatype)
     prefill_model = FlexibleModel(model_config, stage="prefill")
     prefill_output = prefill_model(prompt)
     prefill_operator_latency, prefill_latency, pipeline_latency = prefill_model.mapping_and_simulate(device)
+    # 收集prefill阶段算子能耗（来自各模块的 operator_energy）
+    prefill_operator_energy = []
+    prefill_operator_energy.extend(getattr(prefill_model.attention, 'operator_energy', []) or [])
+    prefill_operator_energy.extend(getattr(prefill_model.ffn, 'operator_energy', []) or [])
     
     # 计算TTFT (Time To First Token)
     prefill_latency_ms = (prefill_latency * math.ceil(model_config.layer_count/device.n_chip) + pipeline_latency) / (device.frequency * 1e6) * 1e3 #单芯片prefill某几层的延时
@@ -201,7 +207,7 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         total = op['总延时']
         
         # 转换为ms单位
-        total_ms = total / (device.frequency * 1e6) * 1e3* math.ceil(model_config.layer_count/device.n_chip)*device.n_chip
+        total_ms = total / (device.frequency * 1e6) * 1e3
         
         # 计算算子占总延时的比例
         op_ratio = total / total_prefill if total_prefill > 0 else 0
@@ -212,6 +218,24 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
             '算子': op_name,
             '总延时(ms)': total_ms,
             '算子占总延时比例': op_ratio
+        })
+
+    # 生成prefill阶段能耗数据
+    prefill_energy_rows = []
+    prefill_energy_scale = 1
+    for e in prefill_operator_energy:
+        op_name = e.get('operator')
+        total = float(e.get('总延时', 0.0))
+        energy_pj = float(e.get('能耗', 0.0)) * prefill_energy_scale
+        total_ms = total / (device.frequency * 1e6) * 1e3 
+        avg_power_w = (energy_pj / total_ms * 1e-9 + sram_leakage_w_total) if total_ms > 0 else None
+        prefill_energy_rows.append({
+            '模型': model_name,
+            '阶段': 'prefill',
+            '算子': op_name,
+            '总延时(ms)': total_ms,
+            '能耗(pJ)': energy_pj,
+            '平均功耗(W)': avg_power_w
         })
     
     # 添加prefill阶段汇总行
@@ -229,8 +253,11 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     
     # 收集decode阶段数据
     decode_data = []
+    decode_energy_rows = []
     # 用于累积每个算子的延时
     op_total = {}
+    # 用于累积每个算子的能耗
+    op_energy_total = {}
     
     total_decode_compute = 0
     total_decode_comm = 0
@@ -244,6 +271,10 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         input = Tensor([micro_batch, 1, hidden_size], data_type=datatype)
         output = decode_model(input)
         decode_operator_latency, decode_latency, pipeline_latency = decode_model.mapping_and_simulate(device)
+        # 取该步的能耗明细
+        step_operator_energy = []
+        step_operator_energy.extend(getattr(decode_model.attention, 'operator_energy', []) or [])
+        step_operator_energy.extend(getattr(decode_model.ffn, 'operator_energy', []) or [])
         
         # 累加当前步骤的延时
         step_compute = sum(op['计算延时'] for op in decode_operator_latency)
@@ -255,7 +286,39 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         total_pipeline_latency += pipeline_latency
         total_decode += step_total
         
-        # 累加每个算子的延时
+        # 为该步写入每个算子的延时行
+        for op in decode_operator_latency:
+            op_name = op['operator']
+            total = op['总延时']
+            total_ms = total / (device.frequency * 1e6) * 1e3
+            op_ratio = total / step_total if step_total > 0 else 0
+            decode_data.append({
+                '模型': model_name,
+                '阶段': 'decode',
+                'decode步长': i,
+                '算子': op_name,
+                '总延时(ms)': total_ms,
+                '算子占总延时比例': op_ratio
+            })
+
+        # 为该步写入每个算子的能耗行
+        for e in step_operator_energy:
+            op_name = e.get('operator')
+            total = float(e.get('总延时', 0.0))
+            energy_pj = float(e.get('能耗', 0.0))
+            total_ms = total / (device.frequency * 1e6) * 1e3
+            avg_power_w = (energy_pj / total_ms * 1e-9 + sram_leakage_w_total) if total_ms > 0 else None
+            decode_energy_rows.append({
+                '模型': model_name,
+                '阶段': 'decode',
+                'decode步长': i,
+                '算子': op_name,
+                '总延时(ms)': total_ms,
+                '能耗(pJ)': energy_pj,
+                '平均功耗(W)': avg_power_w
+            })
+
+        # 累加每个算子的延时（用于阶段汇总）
         for op in decode_operator_latency:
             op_name = op['operator']
             total = op['总延时']
@@ -264,6 +327,10 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
                 op_total[op_name] = 0
             
             op_total[op_name] += total
+        # 累加每个算子的能耗（用于阶段汇总）
+        for e in step_operator_energy:
+            op_name = e.get('operator')
+            op_energy_total[op_name] = op_energy_total.get(op_name, 0.0) + float(e.get('能耗', 0.0))
     
     # 转换为ms单位
     total_decode_compute_ms = total_decode_compute * math.ceil(model_config.layer_count/device.n_chip) / (device.frequency * 1e6) * 1e3*device.n_chip
@@ -274,7 +341,7 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     throughput = batch_size * decode_lenth * 1e3 / (total_decode_ms + total_prefill_ms)
     TBT = total_decode_ms / decode_lenth
     
-    # 处理decode阶段每个算子的累积数据
+    # 处理decode阶段每个算子的累积数据（阶段级总计）
     for op_name in op_total:
         total = op_total[op_name]
         
@@ -290,6 +357,18 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
             '算子': op_name,
             '总延时(ms)': total_ms,
             '算子占总延时比例': op_ratio
+        })
+        # 能耗（按层数×芯片数缩放，与延时一致）
+        energy_scale = math.ceil(model_config.layer_count / device.n_chip) * device.n_chip
+        op_energy_scaled = op_energy_total.get(op_name, 0.0) * energy_scale
+        avg_power_w = (op_energy_scaled / total_ms * 1e-9 + sram_leakage_w_total) if total_ms > 0 else None
+        decode_energy_rows.append({
+            '模型': model_name,
+            '阶段': 'decode',
+            '算子': op_name,
+            '总延时(ms)': total_ms,
+            '能耗(pJ)': op_energy_scaled,
+            '平均功耗(W)': avg_power_w
         })
     
     # 添加decode阶段汇总行
@@ -316,7 +395,10 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     decode_summary = [item for item in decode_data if item.get('算子') == '汇总']
     
     # 返回合并后的数据，汇总行分别放在prefill和decode部分的最后
-    return prefill_operators + prefill_summary + [{}] + [{}] + decode_operators + decode_summary
+    # 组合能耗sheet数据（prefill + decode）
+    operator_energy_rows = prefill_energy_rows + [{'模型': model_name, '阶段': 'prefill', '算子': '汇总'}] + decode_energy_rows + [{'模型': model_name, '阶段': 'decode', '算子': '汇总'}]
+
+    return prefill_operators + prefill_summary + [{}] + [{}] + decode_operators + decode_summary, operator_energy_rows
 
 
 def _load_json_configs(config_path):
@@ -361,48 +443,50 @@ def main():
     all_data = []
     summary_data = []
 
-    for entry in raw_entries:
-        # 复制以避免修改原数据
-        entry_copy = dict(entry)
-        model_cfg, runtime = _build_model_config(entry_copy)
-        device = device_dict.get(runtime['device_name'], device_dict['D37x'])
-        batch_size = runtime['batch_size']
-        prefill_lenth = runtime['prefill_lenth']
-        decode_lenth = runtime['decode_lenth']
-        print(f"[配置] 模型={model_cfg.name} device={runtime['device_name']} batch={batch_size} prefill={prefill_lenth} decode={decode_lenth}")
+    # 复制以避免修改原数据
+    entry_copy = dict(raw_entries[0])
+    model_cfg, runtime = _build_model_config(entry_copy)
+    device = device_dict.get(runtime['device_name'], device_dict['D37x'])
+    batch_size = runtime['batch_size']
+    prefill_lenth = runtime['prefill_lenth']
+    decode_lenth = runtime['decode_lenth']
+    print(f"[配置] 模型={model_cfg.name} device={runtime['device_name']} batch={batch_size} prefill={prefill_lenth} decode={decode_lenth}")
 
-        model_data = collect_model_data(
-            model_cfg,
-            device=device,
-            batch_size=batch_size,
-            prefill_lenth=prefill_lenth,
-            decode_lenth=decode_lenth,
-            use_flexible_model=True
-        )
-        all_data.extend(model_data)
+    model_data, energy_op_rows = collect_model_data(
+        model_cfg,
+        device=device,
+        batch_size=batch_size,
+        prefill_lenth=prefill_lenth,
+        decode_lenth=decode_lenth,
+        use_flexible_model=True
+    )
+    all_data.extend(model_data)
+    energy_all_rows = []
+    energy_all_rows.extend(energy_op_rows)
 
-        prefill_summary = None
-        decode_summary = None
-        for item in model_data:
-            if item.get('算子') == '汇总' and item.get('阶段') == 'prefill':
-                prefill_summary = item
-            elif item.get('算子') == '汇总' and item.get('阶段') == 'decode':
-                decode_summary = item
-        if prefill_summary and decode_summary:
-            summary_data.append({
-                '模型': model_cfg.name,
-                '首词延迟(TTFT)(s)': prefill_summary.get('TTFT(s)', 0),
-                '总延时(ms)': prefill_summary.get('总延时(ms)', 0) + decode_summary.get('总延时(ms)', 0),
-                '吞吐率(tokens/s)': decode_summary.get('吞吐率(tokens/s)', 0),
-                '生成速度(tokens/s)': decode_summary.get('生成速度(tokens/s)', 0),
-                'Prefill计算延时(ms)': prefill_summary.get('计算延时(ms)', 0),
-                'Prefill通信延时(ms)': prefill_summary.get('通信延时(ms)', 0),
-                'Decode计算延时(ms)': decode_summary.get('计算延时(ms)', 0),
-                'Decode通信延时(ms)': decode_summary.get('通信延时(ms)', 0)
-            })
+    prefill_summary = None
+    decode_summary = None
+    for item in model_data:
+        if item.get('算子') == '汇总' and item.get('阶段') == 'prefill':
+            prefill_summary = item
+        elif item.get('算子') == '汇总' and item.get('阶段') == 'decode':
+            decode_summary = item
+    if prefill_summary and decode_summary:
+        summary_data.append({
+            '模型': model_cfg.name,
+            '首词延迟(TTFT)(s)': prefill_summary.get('TTFT(s)', 0),
+            '总延时(ms)': prefill_summary.get('总延时(ms)', 0) + decode_summary.get('总延时(ms)', 0),
+            '吞吐率(tokens/s)': decode_summary.get('吞吐率(tokens/s)', 0),
+            '生成速度(tokens/s)': decode_summary.get('生成速度(tokens/s)', 0),
+            'Prefill计算延时(ms)': prefill_summary.get('计算延时(ms)', 0),
+            'Prefill通信延时(ms)': prefill_summary.get('通信延时(ms)', 0),
+            'Decode计算延时(ms)': decode_summary.get('计算延时(ms)', 0),
+            'Decode通信延时(ms)': decode_summary.get('通信延时(ms)', 0)
+        })
     
     # 创建DataFrame
     df = pd.DataFrame(all_data)
+    energy_op_df = pd.DataFrame(energy_all_rows)
     summary_df = pd.DataFrame(summary_data)
     # 能耗统计
     energy_table = load_energy_table()
@@ -477,6 +561,8 @@ def main():
     pcie_power_w = total_row.get("pcie_energy_pj", 0.0) * energy_scale / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
     dram_power_w = total_row.get("dram_energy_pj", 0.0) * energy_scale / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
     sram_power_w = total_row.get("sram_energy_pj", 0.0) * energy_scale / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
+    sram_power_w += getattr(energy_table, 'sram_leakage_power', 0.0)
+
     total_power_w = mac_power_w + eltwise_power_w + noc_power_w + pcie_power_w + dram_power_w + sram_power_w
 
     energy_total_df = pd.DataFrame([
@@ -485,13 +571,11 @@ def main():
             "Vector功耗(W)": eltwise_power_w,
             "NoC功耗(W)": noc_power_w,
             "PCIe功耗(W)": pcie_power_w,
-            "DRAM功耗(W)": dram_power_w,
+            "DRAM访问功耗(W)": dram_power_w,
             "SRAM功耗(W)": sram_power_w,
             "总功耗(W)": total_power_w,
         }
     ])
-
-    # 时间序列功耗已关闭：不生成 timeseries_df
     
     # 保存到Excel
     # 处理输出路径：优先使用原路径，不存在则回落到工作区
@@ -506,13 +590,18 @@ def main():
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
             # 1. 延迟数据工作表 - 只包含A-E列（模型、阶段、算子、总延时、算子占比）
-            latency_df = df[['模型', '阶段', '算子', '总延时(ms)', '算子占总延时比例']].copy()
+            latency_cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '算子占总延时比例'] if c in df.columns]
+            latency_df = df[latency_cols].copy()
             latency_df.to_excel(writer, sheet_name='延迟数据', index=False)
             
             # 2. 汇总数据工作表 - 包含首词延迟、总延时和吞吐率等汇总数据
             summary_df.to_excel(writer, sheet_name='汇总数据', index=False)
             # 3. 能耗总计工作表（仅平均功耗）
             energy_total_df.to_excel(writer, sheet_name='能耗总计', index=False)
+            # 4. 算子能耗工作表（按阶段/算子输出能耗与平均功耗）
+            if not energy_op_df.empty:
+                cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '能耗(pJ)', '平均功耗(W)'] if c in energy_op_df.columns]
+                energy_op_df[cols].to_excel(writer, sheet_name='算子能耗', index=False)
             # 4. 关闭时间序列功耗工作表（不写入）
             
             # 获取工作表对象并设置格式
@@ -523,13 +612,17 @@ def main():
                 worksheet.set_column('A:A', 15)  # 模型
                 
                 if sheet_name == '延迟数据':
-                    worksheet.set_column('B:B', 10)  # 阶段
-                    worksheet.set_column('C:C', 30)  # 算子
-                    worksheet.set_column('D:E', 15)  # 总延时和比例
-                    
-                    # 添加百分比格式化
+                    # 动态设置列宽与百分比列格式
+                    worksheet.set_column('A:F', 16)
                     percent_format = writer.book.add_format({'num_format': '0.00%'})
-                    worksheet.set_column('E:E', 15, percent_format)  # 算子占比
+                    try:
+                        headers = latency_df.columns.tolist()
+                        if '算子占总延时比例' in headers:
+                            idx = headers.index('算子占总延时比例')
+                            col_letter = chr(ord('A') + idx)
+                            worksheet.set_column(f'{col_letter}:{col_letter}', 16, percent_format)
+                    except Exception:
+                        pass
                 elif sheet_name == '汇总数据':
                     worksheet.set_column('B:I', 18)  # 所有数据列
 
@@ -547,6 +640,8 @@ def main():
                         worksheet.write(0, col_num, value, header_format)
                 elif sheet_name == '能耗总计':
                     worksheet.set_column('A:G', 18)
+                elif sheet_name == '算子能耗':
+                    worksheet.set_column('A:G', 18)
                 elif sheet_name == '时间序列功耗':
                     worksheet.set_column('A:A', 18)  # 阶段
                     worksheet.set_column('B:B', 24)  # 算子
@@ -558,9 +653,14 @@ def main():
         alt_path = os.path.join(os.path.dirname(output_path), f'latency_energy_{ts}.xlsx')
         with pd.ExcelWriter(alt_path, engine='xlsxwriter') as writer:
             latency_df = df[['模型', '阶段', '算子', '总延时(ms)', '算子占总延时比例']].copy()
+            latency_cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '算子占总延时比例'] if c in df.columns]
+            latency_df = df[latency_cols].copy()
             latency_df.to_excel(writer, sheet_name='延迟数据', index=False)
             summary_df.to_excel(writer, sheet_name='汇总数据', index=False)
             energy_total_df.to_excel(writer, sheet_name='能耗总计', index=False)
+            if not energy_op_df.empty:
+                cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '能耗(pJ)', '平均功耗(W)'] if c in energy_op_df.columns]
+                energy_op_df[cols].to_excel(writer, sheet_name='算子能耗', index=False)
         print(f"目标文件被占用，已改存为: {alt_path}")
 
 if __name__ == "__main__":

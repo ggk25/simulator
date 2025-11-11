@@ -7,5 +7,6 @@
   "noc_energy_pj_per_bit_per_hop": 0.61,
   "pcie_energy_pj_per_bit": 8.4,
   "dram_energy_pj_per_bit": 1,
-  "sram_energy_pj_per_32b": 5
+  "sram_energy_pj_per_32b": 20.625,
+  "sram_leakage_power": 9.39
 }

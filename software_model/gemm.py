@@ -73,7 +73,8 @@ class matmul:
         bits = int(8 * self.data_type.word_size)
         counter.add_mac(mac_ops, operator="matmul", bits=bits)
         # Memory traffic: A from SRAM, B from DRAM, C to SRAM
-        a_bytes = (self.M * self.K) * self.data_type.word_size
+        # 现在的映射方式是权重按列切分，输入需要复制到每个core上，a的访问量乘上core数
+        a_bytes = (self.M * self.K) * self.data_type.word_size * device.core_count
         b_bytes = (self.K * self.N) * self.data_type.word_size
         c_bytes = (self.M * self.N) * self.data_type.word_size
         # SRAM energy modeled per 32-bit access
