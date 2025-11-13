@@ -12,12 +12,12 @@ from software_model.GQA import Prefill as GQAPrefill, Decode as GQADecode
 from software_model.MoE import Prefill as MoEPrefill, Decode as MoEDecode
 from software_model.FFN import Prefill as FFNPrefill, Decode as FFNDecode
 from software_model.MLA import Prefill as MLAPrefill, Decode as MLADecode
-# 保留原有的模型导入以确保兼容性
 # 旧有的预定义模型导入已移除，统一使用灵活配置的模型
 from utils import DataType, Tensor, data_type_dict
 from hardware_model.device import device_dict
 from power import get_global_power_counter
 from power.energy_table import load_energy_table
+from model_inference.compute_power import compute_power_from_inference_data
 
 class ModelConfig:
     """模型配置类，用于定义模型的结构"""
@@ -577,6 +577,55 @@ def main():
         }
     ])
     
+    # 计算时间窗口功耗
+    window_size_ms = 50.0  # 时间窗口大小
+    
+    # 分离prefill和decode的算子能耗数据
+    # prefill: 不分步长，直接使用
+    prefill_energy_data = [r for r in energy_op_rows if r.get('阶段') == 'prefill' and r.get('算子') != '汇总' and 'decode步长' not in r]
+    # decode: 使用所有decode步长的数据（每个步长的数据都是独立的，不是累加的）
+    decode_energy_data = [r for r in energy_op_rows if r.get('阶段') == 'decode' and r.get('算子') != '汇总' and 'decode步长' in r]
+    
+    prefill_windows, decode_windows, power_stats = compute_power_from_inference_data(
+        prefill_operator_energy=prefill_energy_data,
+        decode_operator_energy=decode_energy_data,
+        model_config=model_cfg,
+        device_config=device,
+        batch_size=batch_size,
+        window_size_ms=window_size_ms,
+        leakage_power_w=getattr(energy_table, 'sram_leakage_power', 0.0)
+    )
+    
+    # 构建时间窗口功耗DataFrame
+    window_power_rows = []
+    
+    # Prefill窗口
+    for i, window in enumerate(prefill_windows):
+        window_power_rows.append({
+            '阶段': 'prefill',
+            '窗口ID': i,
+            '开始时间(ms)': window.start_ms,
+            '结束时间(ms)': window.end_ms,
+            '窗口能耗(J)': window.total_energy_pj * 1e-12,
+            '平均功耗(W)': window.avg_power_w,
+        })
+    
+    # Decode窗口
+    for i, window in enumerate(decode_windows):
+        window_power_rows.append({
+            '阶段': 'decode',
+            '窗口ID': i,
+            '开始时间(ms)': window.start_ms,
+            '结束时间(ms)': window.end_ms,
+            '窗口能耗(J)': window.total_energy_pj * 1e-12,
+            '平均功耗(W)': window.avg_power_w,
+        })
+    
+    window_power_df = pd.DataFrame(window_power_rows)
+    
+    # 构建功耗统计DataFrame
+    power_stats_df = pd.DataFrame([power_stats])
+    
     # 保存到Excel
     # 处理输出路径：优先使用原路径，不存在则回落到工作区
     default_path = '/Users/ggk/Documents/performance model/model_inference/latency_data.xlsx'
@@ -602,7 +651,14 @@ def main():
             if not energy_op_df.empty:
                 cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '能耗(pJ)', '平均功耗(W)'] if c in energy_op_df.columns]
                 energy_op_df[cols].to_excel(writer, sheet_name='算子能耗', index=False)
-            # 4. 关闭时间序列功耗工作表（不写入）
+            
+            # 5. 时间窗口功耗工作表
+            if not window_power_df.empty:
+                window_power_df.to_excel(writer, sheet_name='时间窗口功耗', index=False)
+            
+            # 6. 功耗统计工作表
+            if not power_stats_df.empty:
+                power_stats_df.to_excel(writer, sheet_name='功耗统计', index=False)
             
             # 获取工作表对象并设置格式
             for sheet_name in writer.sheets:
@@ -642,10 +698,13 @@ def main():
                     worksheet.set_column('A:G', 18)
                 elif sheet_name == '算子能耗':
                     worksheet.set_column('A:G', 18)
-                elif sheet_name == '时间序列功耗':
-                    worksheet.set_column('A:A', 18)  # 阶段
-                    worksheet.set_column('B:B', 24)  # 算子
-                    worksheet.set_column('C:F', 18)  # 时间与功耗
+                elif sheet_name == '时间窗口功耗':
+                    worksheet.set_column('A:A', 12)  # 阶段
+                    worksheet.set_column('B:B', 12)  # 窗口ID
+                    worksheet.set_column('C:D', 18)  # 时间
+                    worksheet.set_column('E:F', 18)  # 能耗与功耗
+                elif sheet_name == '功耗统计':
+                    worksheet.set_column('A:L', 20)
         print(f"数据已成功保存到: {output_path}")
     except PermissionError:
         # 如果目标文件被占用，使用带时间戳的新文件名
@@ -661,6 +720,10 @@ def main():
             if not energy_op_df.empty:
                 cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '能耗(pJ)', '平均功耗(W)'] if c in energy_op_df.columns]
                 energy_op_df[cols].to_excel(writer, sheet_name='算子能耗', index=False)
+            if not window_power_df.empty:
+                window_power_df.to_excel(writer, sheet_name='时间窗口功耗', index=False)
+            if not power_stats_df.empty:
+                power_stats_df.to_excel(writer, sheet_name='功耗统计', index=False)
         print(f"目标文件被占用，已改存为: {alt_path}")
 
 if __name__ == "__main__":
