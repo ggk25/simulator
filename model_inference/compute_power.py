@@ -29,17 +29,18 @@ import math
 
 
 class OperatorExecution:
-    """单个算子的执行信息"""
-    def __init__(self, name: str, start_time_ms: float, duration_ms: float, 
-                 energy_pj: float, chip_id: int = 0, layer_id: int = 0, 
-                 microbatch_id: int = 0):
+    """单个算子的执行信息(区分逻辑能耗与DRAM能耗)"""
+    def __init__(self, name: str, start_time_ms: float, duration_ms: float,
+                 logic_energy_pj: float, dram_energy_pj: float = 0.0,
+                 chip_id: int = 0, layer_id: int = 0, microbatch_id: int = 0):
         self.name = name
-        self.start_time_ms = start_time_ms  # 开始时间（毫秒）
-        self.duration_ms = duration_ms       # 持续时间（毫秒）
-        self.energy_pj = energy_pj          # 总能耗（皮焦）
-        self.chip_id = chip_id              # 芯片ID
-        self.layer_id = layer_id            # 层ID
-        self.microbatch_id = microbatch_id  # micro-batch ID
+        self.start_time_ms = start_time_ms
+        self.duration_ms = duration_ms
+        self.logic_energy_pj = logic_energy_pj
+        self.dram_energy_pj = dram_energy_pj
+        self.chip_id = chip_id
+        self.layer_id = layer_id
+        self.microbatch_id = microbatch_id
         
     @property
     def end_time_ms(self) -> float:
@@ -47,31 +48,40 @@ class OperatorExecution:
         return self.start_time_ms + self.duration_ms
     
     @property
+    def total_energy_pj(self) -> float:
+        return self.logic_energy_pj + self.dram_energy_pj
+
+    @property
     def avg_power_w(self) -> float:
-        """平均功耗（瓦特）
-        
-        计算公式：
-        功耗(W) = 能耗(pJ) / 时间(ms) × 10^-9
-                = 能耗(10^-12 J) / 时间(10^-3 s) × 10^-9
-                = 能耗 × 10^-12 / (时间 × 10^-3)
-                = 能耗 / 时间 × 10^-9
-        """
         if self.duration_ms > 0:
-            return self.energy_pj / self.duration_ms * 1e-9
+            return self.total_energy_pj() / self.duration_ms * 1e-9
+        return 0.0
+
+    @property
+    def avg_logic_power_w(self) -> float:
+        if self.duration_ms > 0:
+            return self.logic_energy_pj / self.duration_ms * 1e-9
+        return 0.0
+
+    @property
+    def avg_dram_power_w(self) -> float:
+        if self.duration_ms > 0:
+            return self.dram_energy_pj / self.duration_ms * 1e-9
         return 0.0
 
 
 class TimeWindow:
-    """时间窗口"""
+    """时间窗口，区分逻辑与DRAM能耗"""
     def __init__(self, start_ms: float, duration_ms: float):
         self.start_ms = start_ms
         self.duration_ms = duration_ms
         self.end_ms = start_ms + duration_ms
-        self.total_energy_pj = 0.0  # 窗口内总能耗
-        self.operators: List[Tuple[OperatorExecution, float]] = []  # (算子, 在窗口内的能耗)
+        self.logic_energy_pj = 0.0
+        self.dram_energy_pj = 0.0
+        self.operators: List[Tuple[OperatorExecution, float, float]] = []  # (算子, 逻辑能耗贡献, DRAM能耗贡献)
         
     def add_operator(self, op: OperatorExecution) -> None:
-        """将算子添加到窗口，计算该算子在窗口内贡献的能耗"""
+        """按重叠比例分配逻辑与DRAM能耗"""
         # 计算算子与窗口的重叠区间
         overlap_start = max(op.start_time_ms, self.start_ms)
         overlap_end = min(op.end_time_ms, self.end_ms)
@@ -83,18 +93,32 @@ class TimeWindow:
         
         # 假设算子功耗均匀分布，按时间比例分配能耗
         if op.duration_ms > 0:
-            energy_in_window = op.energy_pj * (overlap_duration / op.duration_ms)
+            ratio = overlap_duration / op.duration_ms
+            logic_part = op.logic_energy_pj * ratio
+            dram_part = op.dram_energy_pj * ratio
         else:
-            energy_in_window = 0.0
-            
-        self.total_energy_pj += energy_in_window
-        self.operators.append((op, energy_in_window))
+            logic_part = 0.0
+            dram_part = 0.0
+        self.logic_energy_pj += logic_part
+        self.dram_energy_pj += dram_part
+        self.operators.append((op, logic_part, dram_part))
     
     @property
     def avg_power_w(self) -> float:
-        """窗口平均功耗（瓦特）"""
         if self.duration_ms > 0:
-            return self.total_energy_pj / self.duration_ms * 1e-9
+            return (self.logic_energy_pj + self.dram_energy_pj) / self.duration_ms * 1e-9
+        return 0.0
+
+    @property
+    def avg_logic_power_w(self) -> float:
+        if self.duration_ms > 0:
+            return self.logic_energy_pj / self.duration_ms * 1e-9
+        return 0.0
+
+    @property
+    def avg_dram_power_w(self) -> float:
+        if self.duration_ms > 0:
+            return self.dram_energy_pj / self.duration_ms * 1e-9
         return 0.0
 
 
@@ -143,17 +167,19 @@ def build_operator_timeline(
             for op_data in operator_data:
                 op_name = op_data.get('算子', op_data.get('operator', 'unknown'))
                 op_duration = op_data.get('总延时(ms)', 0.0)
-                op_energy = op_data.get('能耗(pJ)', 0.0)
+                logic_energy = op_data.get('逻辑能耗(pJ)', op_data.get('能耗(pJ)', 0.0))
+                dram_energy = op_data.get('DRAM能耗(pJ)', 0.0)
                 
                 # 添加泄漏功耗贡献
                 leakage_energy_pj = leakage_power_w * op_duration * 1e9  # W * ms = 1e9 pJ
-                total_energy = op_energy + leakage_energy_pj
+                total_energy = logic_energy + leakage_energy_pj
                 
                 op_exec = OperatorExecution(
                     name=op_name,
                     start_time_ms=current_time,
                     duration_ms=op_duration,
-                    energy_pj=total_energy,
+                    logic_energy_pj=logic_energy + leakage_energy_pj,
+                    dram_energy_pj=dram_energy,
                     chip_id=chip_id,
                     layer_id=layer_idx,
                     microbatch_id=mb_id
@@ -199,7 +225,6 @@ def compute_windowed_power(
         current_time += window_size_ms
     
     # 将每个算子分配到相关的时间窗口
-    # 优化：由于算子按时间排序，使用指针避免重复搜索已处理的窗口
     window_start_idx = 0  # 记录上一个算子开始匹配的窗口索引
     
     for op in timeline:
@@ -223,7 +248,7 @@ def compute_windowed_power(
                 first_match = False
             
             window.add_operator(op)
-            # 如果是一个算子的dur_ms小于窗口大小，则不会跨多个窗口m，因此可以break
+            # 如果是一个算子的dur_ms小于窗口大小，则不会跨多个窗口，因此可以break
             if op.end_time_ms <= window.end_ms:
                 break
     
@@ -243,17 +268,24 @@ def analyze_power_statistics(windows: List[TimeWindow]) -> Dict[str, float]:
     if not windows:
         return {}
     
-    powers = [w.avg_power_w for w in windows]
+    total_powers = [w.avg_power_w for w in windows]
+    logic_powers = [w.avg_logic_power_w for w in windows]
+    dram_powers = [w.avg_dram_power_w for w in windows]
     
     return {
-        '平均功耗(W)': sum(powers) / len(powers) if powers else 0.0,
-        '峰值功耗(W)': max(powers) if powers else 0.0,
-        '最低功耗(W)': min(powers) if powers else 0.0,
+        '平均功耗(W)': sum(total_powers) / len(total_powers) if total_powers else 0.0,
+        '平均逻辑功耗(W)': sum(logic_powers) / len(logic_powers) if logic_powers else 0.0,
+        '平均DRAM功耗(W)': sum(dram_powers) / len(dram_powers) if dram_powers else 0.0,
+        '峰值功耗(W)': max(total_powers) if total_powers else 0.0,
+        '峰值DRAM功耗(W)': max(dram_powers) if dram_powers else 0.0,
+        '峰值逻辑功耗(W)': max(logic_powers) if logic_powers else 0.0,
         '功耗标准差(W)': (
-            math.sqrt(sum((p - sum(powers)/len(powers))**2 for p in powers) / len(powers))
-            if len(powers) > 1 else 0.0
+            math.sqrt(sum((p - sum(total_powers)/len(total_powers))**2 for p in total_powers) / len(total_powers))
+            if len(total_powers) > 1 else 0.0
         ),
-        '总能耗(J)': sum(w.total_energy_pj for w in windows) * 1e-12,  # pJ to J
+        '总能耗(J)': sum((w.logic_energy_pj + w.dram_energy_pj) for w in windows) * 1e-12,
+        '总逻辑能耗(J)': sum(w.logic_energy_pj for w in windows) * 1e-12,
+        '总DRAM能耗(J)': sum(w.dram_energy_pj for w in windows) * 1e-12,
         '总时长(ms)': sum(w.duration_ms for w in windows),
     }
 
@@ -325,14 +357,41 @@ def compute_power_from_inference_data(
     
     # 合并统计
     combined_stats = {
+        # Prefill 总功耗相关
         'Prefill平均功耗(W)': prefill_stats.get('平均功耗(W)', 0.0),
         'Prefill峰值功耗(W)': prefill_stats.get('峰值功耗(W)', 0.0),
         'Prefill总能耗(J)': prefill_stats.get('总能耗(J)', 0.0),
         'Prefill总时长(ms)': prefill_stats.get('总时长(ms)', 0.0),
+        # Prefill 逻辑/DRAM 细分功耗
+        'Prefill平均逻辑功耗(W)': prefill_stats.get('平均逻辑功耗(W)', 0.0),
+        'Prefill平均DRAM功耗(W)': prefill_stats.get('平均DRAM功耗(W)', 0.0),
+        'Prefill峰值逻辑功耗(W)': prefill_stats.get('峰值逻辑功耗(W)', 0.0),
+        'Prefill峰值DRAM功耗(W)': prefill_stats.get('峰值DRAM功耗(W)', 0.0),
+        'Prefill总逻辑能耗(J)': prefill_stats.get('总逻辑能耗(J)', 0.0),
+        'Prefill总DRAM能耗(J)': prefill_stats.get('总DRAM能耗(J)', 0.0),
+        # Decode 总功耗相关
         'Decode平均功耗(W)': decode_stats.get('平均功耗(W)', 0.0),
         'Decode峰值功耗(W)': decode_stats.get('峰值功耗(W)', 0.0),
         'Decode总能耗(J)': decode_stats.get('总能耗(J)', 0.0),
         'Decode总时长(ms)': decode_stats.get('总时长(ms)', 0.0),
+        # Decode 逻辑/DRAM 细分功耗
+        'Decode平均逻辑功耗(W)': decode_stats.get('平均逻辑功耗(W)', 0.0),
+        'Decode平均DRAM功耗(W)': decode_stats.get('平均DRAM功耗(W)', 0.0),
+        'Decode峰值逻辑功耗(W)': decode_stats.get('峰值逻辑功耗(W)', 0.0),
+        'Decode峰值DRAM功耗(W)': decode_stats.get('峰值DRAM功耗(W)', 0.0),
+        'Decode总逻辑能耗(J)': decode_stats.get('总逻辑能耗(J)', 0.0),
+        'Decode总DRAM能耗(J)': decode_stats.get('总DRAM能耗(J)', 0.0),
+        # 汇总（Prefill+Decode）
+        '全流程总能耗(J)': prefill_stats.get('总能耗(J)', 0.0) + decode_stats.get('总能耗(J)', 0.0),
+        '全流程总逻辑能耗(J)': prefill_stats.get('总逻辑能耗(J)', 0.0) + decode_stats.get('总逻辑能耗(J)', 0.0),
+        '全流程总DRAM能耗(J)': prefill_stats.get('总DRAM能耗(J)', 0.0) + decode_stats.get('总DRAM能耗(J)', 0.0),
+        '全流程平均功耗(W)': (prefill_stats.get('平均功耗(W)', 0.0) + decode_stats.get('平均功耗(W)', 0.0)) / (2 if (prefill_windows and decode_windows) else 1 or 1),
+        '全流程平均逻辑功耗(W)': (prefill_stats.get('平均逻辑功耗(W)', 0.0) + decode_stats.get('平均逻辑功耗(W)', 0.0)) / (2 if (prefill_windows and decode_windows) else 1 or 1),
+        '全流程平均DRAM功耗(W)': (prefill_stats.get('平均DRAM功耗(W)', 0.0) + decode_stats.get('平均DRAM功耗(W)', 0.0)) / (2 if (prefill_windows and decode_windows) else 1 or 1),
+        '全流程峰值功耗(W)': max(prefill_stats.get('峰值功耗(W)', 0.0), decode_stats.get('峰值功耗(W)', 0.0)),
+        '全流程峰值逻辑功耗(W)': max(prefill_stats.get('峰值逻辑功耗(W)', 0.0), decode_stats.get('峰值逻辑功耗(W)', 0.0)),
+        '全流程峰值DRAM功耗(W)': max(prefill_stats.get('峰值DRAM功耗(W)', 0.0), decode_stats.get('峰值DRAM功耗(W)', 0.0)),
+        # 其它
         '时间窗口大小(ms)': window_size_ms,
         'Prefill窗口数': len(prefill_windows),
         'Decode窗口数': len(decode_windows),

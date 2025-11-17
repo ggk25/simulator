@@ -7,10 +7,13 @@ def size_of_list(list: List):
     return result
 
 def size(list):
+    # 允许 None：当算子未显式提供 output_shape 时返回 0
+    if list is None:
+        return 0
     if isinstance(list, List):     
         return size_of_list(list)
     else:
-        return list.size
+        return getattr(list, 'size', 0)
 
 def closest_factors(n):
     x = int(n**0.5)

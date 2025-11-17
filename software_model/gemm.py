@@ -83,6 +83,8 @@ class matmul:
         # DRAM: only B
         counter.add_dram_bytes(b_bytes, operator="matmul")
 
+        # Note: Compute latency first, then compute DRAM energy using that duration
+
         if(len(self.input1_shape) > 3):
             M = max(min_gemm_bubble ,self.input1_shape[0] * self.input1_shape[2])
             K = math.ceil(self.input1_shape[-1] / device.PE_count)
