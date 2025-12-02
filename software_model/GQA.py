@@ -92,16 +92,40 @@ class Prefill:
 
             return total_pj
 
+        GEMM_SET = {"Q_proj", "K_proj", "V_proj", "QKT", "SV", "O_proj"}
+        ELEMENTWISE_SET = {"attn_rmsnorm", "Q_rope", "K_rope", "softmax", "attn_resadd"}
+
         def measure(op_name, op_obj=None, comm_latency_func=lambda sz: 0, output_shape_override=None, layer_id=None, micro_batch_id=None):
             output_shape = output_shape_override if output_shape_override is not None else op_obj.output_shape
             output_datasize = size(output_shape) * self.datatype.word_size
             energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             compute_latency = op_obj.mapping_and_simulate(device)
-            communication_latency = comm_latency_func(output_datasize)
+            comm_val = comm_latency_func(output_datasize)
+            # 支持返回 (onchip, pcie) 的拆分, 否则全部视为片上通信
+            if isinstance(comm_val, tuple):
+                onchip_comm_latency, pcie_comm_latency = comm_val
+            else:
+                onchip_comm_latency = comm_val
+                pcie_comm_latency = 0.0
+            communication_latency = onchip_comm_latency + pcie_comm_latency
             energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             energy_delta = energy_after - energy_before
             total = compute_latency + communication_latency
-            operator_latency.append({'operator': op_name, 'micro_batch_id': micro_batch_id, 'layer_id': layer_id, '计算延时': compute_latency, '通信延时': communication_latency, '总延时': total})
+            # 分类：GEMM 与 ElementWise
+            gemm_latency = compute_latency if op_name in GEMM_SET else 0.0
+            eltwise_latency = compute_latency if op_name in ELEMENTWISE_SET else 0.0
+            operator_latency.append({
+                'operator': op_name,
+                'micro_batch_id': micro_batch_id,
+                'layer_id': layer_id,
+                '计算延时': compute_latency,
+                '通信延时': communication_latency,
+                '总延时': total,
+                'GEMM延时': gemm_latency,
+                'ElementWise延时': eltwise_latency,
+                '片上通信延时': onchip_comm_latency,
+                'PCIe延时': pcie_comm_latency
+            })
             dram_pj = _calc_dram_energy(op_name, op_obj, total)
             operator_energy.append({'operator': op_name, 'micro_batch_id': micro_batch_id, 'layer_id': layer_id, '总延时': total, 'logic能耗': energy_delta, 'DRAM能耗': dram_pj})
             return total
@@ -212,16 +236,38 @@ class Decode:
                 active_pj = 0.0
             return standby_pj + active_pj
 
+        GEMM_SET = {"Q_proj", "K_proj", "V_proj", "QKT", "SV", "O_proj"}
+        ELEMENTWISE_SET = {"attn_rmsnorm", "Q_rope", "K_rope", "softmax", "attn_resadd"}
+
         def measure(op_name, op_obj, comm_latency_func=lambda sz: 0, output_shape_override=None, layer_id=None, micro_batch_id=None):
             output_shape = output_shape_override if output_shape_override is not None else op_obj.output_shape
             output_datasize = size(output_shape) * self.datatype.word_size
             energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             compute_latency = op_obj.mapping_and_simulate(device)
-            communication_latency = comm_latency_func(output_datasize)
+            comm_val = comm_latency_func(output_datasize)
+            if isinstance(comm_val, tuple):
+                onchip_comm_latency, pcie_comm_latency = comm_val
+            else:
+                onchip_comm_latency = comm_val
+                pcie_comm_latency = 0.0
+            communication_latency = onchip_comm_latency + pcie_comm_latency
             energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             energy_delta = energy_after - energy_before
             total = compute_latency + communication_latency
-            operator_latency.append({'operator': op_name, 'layer_id': layer_id, 'micro_batch_id': micro_batch_id, '计算延时': compute_latency, '通信延时': communication_latency, '总延时': total})
+            gemm_latency = compute_latency if op_name in GEMM_SET else 0.0
+            eltwise_latency = compute_latency if op_name in ELEMENTWISE_SET else 0.0
+            operator_latency.append({
+                'operator': op_name,
+                'layer_id': layer_id,
+                'micro_batch_id': micro_batch_id,
+                '计算延时': compute_latency,
+                '通信延时': communication_latency,
+                '总延时': total,
+                'GEMM延时': gemm_latency,
+                'ElementWise延时': eltwise_latency,
+                '片上通信延时': onchip_comm_latency,
+                'PCIe延时': pcie_comm_latency
+            })
             dram_pj = _calc_dram_energy(op_name, op_obj, total)
             operator_energy.append({'operator': op_name, 'micro_batch_id': micro_batch_id, 'layer_id': layer_id, '总延时': total, 'logic能耗': energy_delta, 'DRAM能耗': dram_pj})
             return total

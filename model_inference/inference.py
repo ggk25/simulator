@@ -13,7 +13,6 @@ from software_model.GQA import Prefill as GQAPrefill, Decode as GQADecode
 from software_model.MoE import Prefill as MoEPrefill, Decode as MoEDecode
 from software_model.FFN import Prefill as FFNPrefill, Decode as FFNDecode
 from software_model.MLA import Prefill as MLAPrefill, Decode as MLADecode
-# 旧有的预定义模型导入已移除，统一使用灵活配置的模型
 from utils import DataType, Tensor, data_type_dict
 from hardware_model.device import device_dict
 from power import get_global_power_counter
@@ -143,7 +142,7 @@ class FlexibleModel:
 
 
 def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_lenth, use_flexible_model=True):
-    micro_batch = batch_size / device.n_chip
+    micro_batch = math.ceil(batch_size / device.n_chip)
     n_layers_per_chip = math.ceil(model_config.layer_count / device.n_chip)
     model_name = model_config.name
     hidden_size = model_config.hidden_size
@@ -178,13 +177,43 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     prefill_data = []
     pref_total_cycles = total_prefill_cycles if total_prefill_cycles > 0 else 1.0
     prefill_op_cycles = {}
+    prefill_op_gemm_cycles = {}
+    prefill_op_eltwise_cycles = {}
+    prefill_op_onchip_cycles = {}
+    prefill_op_pcie_cycles = {}
     for op in prefill_operator_latency_all:
         op_name = op['operator']
         prefill_op_cycles[op_name] = prefill_op_cycles.get(op_name, 0.0) + op['总延时']
+        prefill_op_gemm_cycles[op_name] = prefill_op_gemm_cycles.get(op_name, 0.0) + op.get('GEMM延时', 0.0)
+        prefill_op_eltwise_cycles[op_name] = prefill_op_eltwise_cycles.get(op_name, 0.0) + op.get('ElementWise延时', 0.0)
+        prefill_op_onchip_cycles[op_name] = prefill_op_onchip_cycles.get(op_name, 0.0) + op.get('片上通信延时', 0.0)
+        prefill_op_pcie_cycles[op_name] = prefill_op_pcie_cycles.get(op_name, 0.0) + op.get('PCIe延时', 0.0)
     for op_name, total_cycles in prefill_op_cycles.items():
         total_ms = total_cycles / (device.frequency * 1e6) * 1e3
         ratio = total_cycles / pref_total_cycles
-        prefill_data.append({'模型': model_name, '阶段': 'prefill', '算子': op_name, '总延时(ms)': total_ms, '算子占总延时比例': ratio})
+        gemm_cycles = prefill_op_gemm_cycles.get(op_name, 0.0)
+        eltwise_cycles = prefill_op_eltwise_cycles.get(op_name, 0.0)
+        onchip_cycles = prefill_op_onchip_cycles.get(op_name, 0.0)
+        pcie_cycles = prefill_op_pcie_cycles.get(op_name, 0.0)
+        gemm_ms = gemm_cycles / (device.frequency * 1e6) * 1e3
+        eltwise_ms = eltwise_cycles / (device.frequency * 1e6) * 1e3
+        onchip_ms = onchip_cycles / (device.frequency * 1e6) * 1e3
+        pcie_ms = pcie_cycles / (device.frequency * 1e6) * 1e3
+        compute_ms = (gemm_cycles + eltwise_cycles) / (device.frequency * 1e6) * 1e3
+        comm_ms = (onchip_cycles + pcie_cycles) / (device.frequency * 1e6) * 1e3
+        prefill_data.append({
+            '模型': model_name,
+            '阶段': 'prefill',
+            '算子': op_name,
+            '计算延时(ms)': compute_ms,
+            '通信延时(ms)': comm_ms,
+            '总延时(ms)': total_ms,
+            '算子占总延时比例': ratio,
+            'GEMM延时(ms)': gemm_ms,
+            'ElementWise延时(ms)': eltwise_ms,
+            '片上通信延时(ms)': onchip_ms,
+            'PCIe延时(ms)': pcie_ms
+        })
 
     # Prefill energy rows
     prefill_energy_rows = []
@@ -198,7 +227,26 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         DRAM_power_w = (dram_pj / total_ms * 1e-9) if total_ms > 0 else None
         prefill_energy_rows.append({'模型': model_name, '阶段': 'prefill', '算子': op_name, '总延时(ms)': total_ms, '逻辑能耗(pJ)': logic_pj, 'DRAM能耗(pJ)': dram_pj, 'logic功耗(w)': logic_power_w, 'DRAM功耗(W)': DRAM_power_w})
 
-    prefill_data.append({'模型': model_name, '阶段': 'prefill', '算子': '汇总', '计算延时(ms)': total_prefill_compute_ms, '通信延时(ms)': total_prefill_comm_ms, '总延时(ms)': total_prefill_ms, '计算延时占比': total_prefill_compute_cycles / pref_total_cycles, '通信延时占比': total_prefill_comm_cycles / pref_total_cycles, 'TTFT(s)': ttft})
+    # Prefill 分类汇总
+    prefill_total_gemm_ms = sum(prefill_op_gemm_cycles.values()) / (device.frequency * 1e6) * 1e3
+    prefill_total_eltwise_ms = sum(prefill_op_eltwise_cycles.values()) / (device.frequency * 1e6) * 1e3
+    prefill_total_onchip_ms = sum(prefill_op_onchip_cycles.values()) / (device.frequency * 1e6) * 1e3
+    prefill_total_pcie_ms = sum(prefill_op_pcie_cycles.values()) / (device.frequency * 1e6) * 1e3
+    prefill_data.append({
+        '模型': model_name,
+        '阶段': 'prefill',
+        '算子': '汇总',
+        '计算延时(ms)': total_prefill_compute_ms,
+        '通信延时(ms)': total_prefill_comm_ms,
+        '总延时(ms)': total_prefill_ms,
+        '计算延时占比': total_prefill_compute_cycles / pref_total_cycles,
+        '通信延时占比': total_prefill_comm_cycles / pref_total_cycles,
+        'GEMM延时(ms)': prefill_total_gemm_ms,
+        'ElementWise延时(ms)': prefill_total_eltwise_ms,
+        '片上通信延时(ms)': prefill_total_onchip_ms,
+        'PCIe延时(ms)': prefill_total_pcie_ms,
+        'TTFT(s)': ttft
+    })
 
     # Decode
     decode_data = []
@@ -210,6 +258,10 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     op_stage_logic_energy = {}
     op_stage_dram_energy = {}
 
+    decode_total_gemm_cycles = 0.0
+    decode_total_eltwise_cycles = 0.0
+    decode_total_onchip_cycles = 0.0
+    decode_total_pcie_cycles = 0.0
     for step in range(1, decode_lenth + 1):
         context_lenth = prefill_lenth + step
         decode_model = FlexibleModel(model_config, stage="decode", context_length=context_lenth)
@@ -231,13 +283,48 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
 
         # per-step operator latency rows — 聚合相同算子在不同层与不同micro-batch的延时
         step_op_cycles = {}
+        step_op_gemm_cycles = {}
+        step_op_eltwise_cycles = {}
+        step_op_onchip_cycles = {}
+        step_op_pcie_cycles = {}
         for op in step_lat_list_all:
             op_name = op['operator']
             step_op_cycles[op_name] = step_op_cycles.get(op_name, 0.0) + op['总延时']
+            step_op_gemm_cycles[op_name] = step_op_gemm_cycles.get(op_name, 0.0) + op.get('GEMM延时', 0.0)
+            step_op_eltwise_cycles[op_name] = step_op_eltwise_cycles.get(op_name, 0.0) + op.get('ElementWise延时', 0.0)
+            step_op_onchip_cycles[op_name] = step_op_onchip_cycles.get(op_name, 0.0) + op.get('片上通信延时', 0.0)
+            step_op_pcie_cycles[op_name] = step_op_pcie_cycles.get(op_name, 0.0) + op.get('PCIe延时', 0.0)
         for op_name, cycles in step_op_cycles.items():
             ms = cycles / (device.frequency * 1e6) * 1e3
             ratio = cycles / step_total_cycles if step_total_cycles > 0 else 0
-            decode_data.append({'模型': model_name, '阶段': 'decode', 'decode步长': step, '算子': op_name, '总延时(ms)': ms, '算子占总延时比例': ratio})
+            gemm_cycles = step_op_gemm_cycles.get(op_name, 0.0)
+            eltwise_cycles = step_op_eltwise_cycles.get(op_name, 0.0)
+            onchip_cycles = step_op_onchip_cycles.get(op_name, 0.0)
+            pcie_cycles = step_op_pcie_cycles.get(op_name, 0.0)
+            gemm_ms = gemm_cycles / (device.frequency * 1e6) * 1e3
+            eltwise_ms = eltwise_cycles / (device.frequency * 1e6) * 1e3
+            onchip_ms = onchip_cycles / (device.frequency * 1e6) * 1e3
+            pcie_ms = pcie_cycles / (device.frequency * 1e6) * 1e3
+            compute_ms = (gemm_cycles + eltwise_cycles) / (device.frequency * 1e6) * 1e3
+            comm_ms = (onchip_cycles + pcie_cycles) / (device.frequency * 1e6) * 1e3
+            decode_data.append({
+                '模型': model_name,
+                '阶段': 'decode',
+                'decode步长': step,
+                '算子': op_name,
+                '计算延时(ms)': compute_ms,
+                '通信延时(ms)': comm_ms,
+                '总延时(ms)': ms,
+                '算子占总延时比例': ratio,
+                'GEMM延时(ms)': gemm_ms,
+                'ElementWise延时(ms)': eltwise_ms,
+                '片上通信延时(ms)': onchip_ms,
+                'PCIe延时(ms)': pcie_ms
+            })
+            decode_total_gemm_cycles += gemm_cycles
+            decode_total_eltwise_cycles += eltwise_cycles
+            decode_total_onchip_cycles += onchip_cycles
+            decode_total_pcie_cycles += pcie_cycles
 
         # per-step energy rows
         for e in step_energy_list_all:
@@ -273,10 +360,45 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         logic_pj_total = op_stage_logic_energy.get(op_name, 0.0)
         dram_pj_total = op_stage_dram_energy.get(op_name, 0.0)
         avg_power_w = ((logic_pj_total + dram_pj_total) / ms * 1e-9 + sram_leakage_w_total) if ms > 0 else None
-        decode_data.append({'模型': model_name, '阶段': 'decode', '算子': op_name, '总延时(ms)': ms, '算子占总延时比例': ratio})
+        # 统计阶段分类：从所有 decode_data（非汇总）中搜集对应算子的分类周期
+        stage_gemm_cycles = sum(x.get('GEMM延时(ms)', 0.0) * (device.frequency * 1e6) / 1e3 for x in decode_data if x.get('算子') == op_name and 'decode步长' in x)  # revert ms->cycles approximation
+        stage_eltwise_cycles = sum(x.get('ElementWise延时(ms)', 0.0) * (device.frequency * 1e6) / 1e3 for x in decode_data if x.get('算子') == op_name and 'decode步长' in x)
+        stage_onchip_cycles = sum(x.get('片上通信延时(ms)', 0.0) * (device.frequency * 1e6) / 1e3 for x in decode_data if x.get('算子') == op_name and 'decode步长' in x)
+        stage_pcie_cycles = sum(x.get('PCIe延时(ms)', 0.0) * (device.frequency * 1e6) / 1e3 for x in decode_data if x.get('算子') == op_name and 'decode步长' in x)
+        gemm_ms = stage_gemm_cycles / (device.frequency * 1e6) * 1e3
+        eltwise_ms = stage_eltwise_cycles / (device.frequency * 1e6) * 1e3
+        onchip_ms = stage_onchip_cycles / (device.frequency * 1e6) * 1e3
+        pcie_ms = stage_pcie_cycles / (device.frequency * 1e6) * 1e3
+        # 汇总级别不再重复算子占比, 但保留分类延时
+        decode_data.append({
+            '模型': model_name,
+            '阶段': 'decode',
+            '算子': op_name,
+            '总延时(ms)': ms,
+            '算子占总延时比例': ratio,
+            'GEMM延时(ms)': gemm_ms,
+            'ElementWise延时(ms)': eltwise_ms,
+            '片上通信延时(ms)': onchip_ms,
+            'PCIe延时(ms)': pcie_ms
+        })
         decode_energy_rows.append({'模型': model_name, '阶段': 'decode', '算子': op_name, '总延时(ms)': ms, '逻辑能耗(pJ)': logic_pj_total, 'DRAM能耗(pJ)': dram_pj_total, '总能耗(pJ)': logic_pj_total + dram_pj_total, '平均功耗(W)': avg_power_w})
 
-    decode_data.append({'模型': model_name, '阶段': 'decode', '算子': '汇总', '计算延时(ms)': total_decode_compute_ms, '通信延时(ms)': total_decode_comm_ms, '总延时(ms)': total_decode_ms, '计算延时占比': total_decode_compute_cycles / (total_decode_cycles if total_decode_cycles > 0 else 1.0), '通信延时占比': total_decode_comm_cycles / (total_decode_cycles if total_decode_cycles > 0 else 1.0), '吞吐率(tokens/s)': throughput, '生成速度(tokens/s)': 1000 / (TBT if TBT > 0 else 1.0)})
+    decode_data.append({
+        '模型': model_name,
+        '阶段': 'decode',
+        '算子': '汇总',
+        '计算延时(ms)': total_decode_compute_ms,
+        '通信延时(ms)': total_decode_comm_ms,
+        '总延时(ms)': total_decode_ms,
+        '计算延时占比': total_decode_compute_cycles / (total_decode_cycles if total_decode_cycles > 0 else 1.0),
+        '通信延时占比': total_decode_comm_cycles / (total_decode_cycles if total_decode_cycles > 0 else 1.0),
+        'GEMM延时(ms)': decode_total_gemm_cycles / (device.frequency * 1e6) * 1e3,
+        'ElementWise延时(ms)': decode_total_eltwise_cycles / (device.frequency * 1e6) * 1e3,
+        '片上通信延时(ms)': decode_total_onchip_cycles / (device.frequency * 1e6) * 1e3,
+        'PCIe延时(ms)': decode_total_pcie_cycles / (device.frequency * 1e6) * 1e3,
+        '吞吐率(tokens/s)': throughput,
+        '生成速度(tokens/s)': 1000 / (TBT if TBT > 0 else 1.0)
+    })
 
     prefill_operators = [x for x in prefill_data if x.get('算子') != '汇总']
     prefill_summary = [x for x in prefill_data if x.get('算子') == '汇总']
@@ -372,7 +494,6 @@ def main():
     df = pd.DataFrame(all_data)
     energy_op_df = pd.DataFrame(energy_all_rows)
 
-    # 为避免算子能耗表过大（芯片×层×步长展开），仅在写入Excel时对能耗数据进行聚合：
     # 1) Prefill：按算子聚合
     # 2) Decode：按 (decode步长, 算子) 聚合
     # 保留原始 energy_all_rows 用于时间窗口功耗计算
@@ -475,7 +596,6 @@ def main():
         avg_power_w = total_energy_pj / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
     except Exception:
         avg_power_w = 0.0
-    # 仅输出平均功耗，不再展示各部分能耗分项
     # 计算各部分平均功耗（W）
     mac_power_w = total_row.get("mac_energy_pj", 0.0) / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
     eltwise_power_w = total_row.get("eltwise_energy_pj", 0.0) / total_time_ms * 1e-9 if total_time_ms > 0 else 0.0
@@ -571,7 +691,8 @@ def main():
     try:
         with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
             # 1. 延迟数据工作表 - 只包含A-E列（模型、阶段、算子、总延时、算子占比）
-            latency_cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '总延时(ms)', '算子占总延时比例'] if c in df.columns]
+            latency_cols = [c for c in ['模型', '阶段', 'decode步长', '算子', '计算延时(ms)', '通信延时(ms)', '总延时(ms)', '算子占总延时比例',
+                                        'GEMM延时(ms)', 'ElementWise延时(ms)', '片上通信延时(ms)', 'PCIe延时(ms)'] if c in df.columns]
             latency_df = df[latency_cols].copy()
             latency_df.to_excel(writer, sheet_name='延迟数据', index=False)
             

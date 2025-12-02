@@ -6,15 +6,15 @@ performance model/
 │   ├── device.py
 │   └── memory_module.py
 ├── model_inference/
-│   ├── gui_model_config.py
-│   ├── model_inference.py
+│   ├── compute_power.py
+│   ├── inference.py
 ├── power/
 │   ├── __init__.py
+│   ├── dram_power.py
 │   ├── energy_table.py
 │   └── power_counter.py
 ├── software_model/
 │   ├── communication.py
-│   ├── deepseek.py
 │   ├── FFN.py
 │   ├── gemm.py
 │   ├── GQA.py
@@ -22,5 +22,4 @@ performance model/
 │   ├── MLA.py
 │   ├── MoE.py
 │   ├── non_gemm.py
-│   └── seed_oss.py
 

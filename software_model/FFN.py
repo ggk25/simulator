@@ -67,16 +67,38 @@ class Prefill():
             comp = compute_dram_energy(device.memory, weight_bytes, 0.0, duration_cycles, device.frequency)
             return float(comp.get('total', 0.0))
 
+        GEMM_SET = {"linear_up", "linear_gate", "linear_down"}
+        ELEMENTWISE_SET = {"ffn_rmsnorm", "silu", "swiglu_mul", "ffn_resadd"}
+
         def measure(op_name, op_obj, comm_latency_func=lambda sz: 0, output_shape_override=None, layer_id: int = None, micro_batch_id: int = None):
             output_shape = output_shape_override if output_shape_override is not None else op_obj.output_shape
             output_datasize = size(output_shape) * self.datatype.word_size
             energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             compute_latency = op_obj.mapping_and_simulate(device)
-            communication_latency = comm_latency_func(output_datasize)
+            comm_val = comm_latency_func(output_datasize)
+            if isinstance(comm_val, tuple):
+                onchip_comm_latency, pcie_comm_latency = comm_val
+            else:
+                onchip_comm_latency = comm_val
+                pcie_comm_latency = 0.0
+            communication_latency = onchip_comm_latency + pcie_comm_latency
             energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             energy_delta = energy_after - energy_before
             total = compute_latency + communication_latency
-            operator_latency.append({'operator': op_name, 'layer_id': layer_id, 'micro_batch_id': micro_batch_id, '计算延时': compute_latency, '通信延时': communication_latency, '总延时': total})
+            gemm_latency = compute_latency if op_name in GEMM_SET else 0.0
+            eltwise_latency = compute_latency if op_name in ELEMENTWISE_SET else 0.0
+            operator_latency.append({
+                'operator': op_name,
+                'layer_id': layer_id,
+                'micro_batch_id': micro_batch_id,
+                '计算延时': compute_latency,
+                '通信延时': communication_latency,
+                '总延时': total,
+                'GEMM延时': gemm_latency,
+                'ElementWise延时': eltwise_latency,
+                '片上通信延时': onchip_comm_latency,
+                'PCIe延时': pcie_comm_latency
+            })
             dram_pj = _calc_dram_energy(op_name, total)
             operator_energy.append({'operator': op_name, 'layer_id': layer_id, 'micro_batch_id': micro_batch_id, '总延时': total, 'logic能耗': energy_delta, 'DRAM能耗': dram_pj})
             return total, output_datasize
@@ -105,8 +127,23 @@ class Prefill():
         total_latency += t
         
         if( (layer_id +1) % n_layers_per_chip ==0):
-            pipeline_latency = concat(device ,last_out) + p2p(device ,last_out) + scatter(device ,last_out)
-            operator_latency.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, '总延时': pipeline_latency})
+            # 分解 pipeline 通信延迟：片上 concat + scatter, PCIe p2p
+            onchip_part = concat(device ,last_out) + scatter(device ,last_out)
+            pcie_part = p2p(device ,last_out)
+            pipeline_latency = onchip_part + pcie_part
+            operator_latency.append({
+                'operator': 'pipeline_communication',
+                'micro_batch_id': micro_batch_id,
+                'layer_id': layer_id,
+                '计算延时': 0.0,
+                '通信延时': pipeline_latency,
+                '总延时': pipeline_latency,
+                'GEMM延时': 0.0,
+                'ElementWise延时': 0.0,
+                '片上通信延时': onchip_part,
+                'PCIe延时': pcie_part
+            })
+            operator_energy.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, 'layer_id': layer_id, '总延时': pipeline_latency, 'logic能耗': 0.0, 'DRAM能耗': 0.0})
             total_latency += pipeline_latency
         
         return operator_latency, total_latency, operator_energy
@@ -162,16 +199,38 @@ class Decode():
             comp = compute_dram_energy(device.memory, weight_bytes, 0.0, duration_cycles, device.frequency)
             return float(comp.get('total', 0.0))
 
+        GEMM_SET = {"linear_up", "linear_gate", "linear_down"}
+        ELEMENTWISE_SET = {"ffn_rmsnorm", "silu", "swiglu_mul", "ffn_resadd"}
+
         def measure(op_name, op_obj, comm_latency_func=lambda sz: 0, output_shape_override=None, layer_id: int = None, micro_batch_id: int = None):
             output_shape = output_shape_override if output_shape_override is not None else op_obj.output_shape
             output_datasize = size(output_shape) * self.datatype.word_size
             energy_before = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             compute_latency = op_obj.mapping_and_simulate(device)
-            communication_latency = comm_latency_func(output_datasize)
+            comm_val = comm_latency_func(output_datasize)
+            if isinstance(comm_val, tuple):
+                onchip_comm_latency, pcie_comm_latency = comm_val
+            else:
+                onchip_comm_latency = comm_val
+                pcie_comm_latency = 0.0
+            communication_latency = onchip_comm_latency + pcie_comm_latency
             energy_after = counter.compute_energy(energy_table).get("__total__", {}).get("total_energy_pj", 0.0)
             energy_delta = energy_after - energy_before
             total = compute_latency + communication_latency
-            operator_latency.append({'operator': op_name, 'layer_id': layer_id, 'micro_batch_id': micro_batch_id, '计算延时': compute_latency, '通信延时': communication_latency, '总延时': total})
+            gemm_latency = compute_latency if op_name in GEMM_SET else 0.0
+            eltwise_latency = compute_latency if op_name in ELEMENTWISE_SET else 0.0
+            operator_latency.append({
+                'operator': op_name,
+                'layer_id': layer_id,
+                'micro_batch_id': micro_batch_id,
+                '计算延时': compute_latency,
+                '通信延时': communication_latency,
+                '总延时': total,
+                'GEMM延时': gemm_latency,
+                'ElementWise延时': eltwise_latency,
+                '片上通信延时': onchip_comm_latency,
+                'PCIe延时': pcie_comm_latency
+            })
             dram_pj = _calc_dram_energy(op_name, total)
             operator_energy.append({'operator': op_name, 'layer_id': layer_id, 'micro_batch_id': micro_batch_id, '总延时': total, 'logic能耗': energy_delta, 'DRAM能耗': dram_pj})
             return total, output_datasize
@@ -200,8 +259,22 @@ class Decode():
         total_latency += t
 
         if( (layer_id +1) % n_layers_per_chip ==0):
-            pipeline_latency = concat(device ,last_out) + p2p(device ,last_out) + scatter(device ,last_out)
-            operator_latency.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, '总延时': pipeline_latency})
+            onchip_part = concat(device ,last_out) + scatter(device ,last_out)
+            pcie_part = p2p(device ,last_out)
+            pipeline_latency = onchip_part + pcie_part
+            operator_latency.append({
+                'operator': 'pipeline_communication',
+                'micro_batch_id': micro_batch_id,
+                'layer_id': layer_id,
+                '计算延时': 0.0,
+                '通信延时': pipeline_latency,
+                '总延时': pipeline_latency,
+                'GEMM延时': 0.0,
+                'ElementWise延时': 0.0,
+                '片上通信延时': onchip_part,
+                'PCIe延时': pcie_part
+            })
+            operator_energy.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, 'layer_id': layer_id, '总延时': pipeline_latency, 'logic能耗': 0.0, 'DRAM能耗': 0.0})
             total_latency += pipeline_latency
         
         return operator_latency, total_latency ,operator_energy

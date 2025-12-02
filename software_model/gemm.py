@@ -62,7 +62,7 @@ class matmul:
     def mapping_and_simulate(self, device:Device):
         array_width = device.compute_module.systolic_array.array_width
         DRAM_bandwidth_per_cycle = device.memory.DRAM_bandwidth* device.memory.DRAM_bandwidth_util * 1e3 / device.frequency
-        min_gemm_bubble = math.ceil(self.data_type.word_size * device.compute_module.systolic_array.array_height \
+        min_gemm_bubble = math.ceil(device.compute_module.systolic_array.array_height \
                             * device.compute_module.systolic_array.array_width * device.PE_count * \
                             device.core_count / DRAM_bandwidth_per_cycle)
         
