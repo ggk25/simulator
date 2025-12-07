@@ -126,7 +126,7 @@ class Prefill():
         t, last_out= measure("ffn_resadd", self.ffn_resadd, layer_id=layer_id, micro_batch_id=micro_batch_id)
         total_latency += t
         
-        if( (layer_id +1) % n_layers_per_chip ==0):
+        if( (layer_id +1) % n_layers_per_chip ==0 and device.n_chip >1):
             # 分解 pipeline 通信延迟：片上 concat + scatter, PCIe p2p
             onchip_part = concat(device ,last_out) + scatter(device ,last_out)
             pcie_part = p2p(device ,last_out)
@@ -258,7 +258,7 @@ class Decode():
         t, last_out = measure("ffn_resadd", self.ffn_resadd, layer_id=layer_id, micro_batch_id=micro_batch_id)
         total_latency += t
 
-        if( (layer_id +1) % n_layers_per_chip ==0):
+        if( (layer_id +1) % n_layers_per_chip ==0  and device.n_chip >1):
             onchip_part = concat(device ,last_out) + scatter(device ,last_out)
             pcie_part = p2p(device ,last_out)
             pipeline_latency = onchip_part + pcie_part

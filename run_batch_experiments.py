@@ -6,7 +6,7 @@ import time
 import sys
 
 # Configuration
-BATCH_SIZES = [1, 5, 25, 50, 100, 150, 200, 250]
+BATCH_SIZES = [1]
 CONFIG_FILE = os.path.join('model_inference', 'model_config.json')
 INFERENCE_SCRIPT = os.path.join('model_inference', 'inference.py')
 OUTPUT_FILE = os.path.join('model_inference', 'latency_energy.xlsx')

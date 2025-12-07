@@ -13,6 +13,8 @@ from software_model.GQA import Prefill as GQAPrefill, Decode as GQADecode
 from software_model.MoE import Prefill as MoEPrefill, Decode as MoEDecode
 from software_model.FFN import Prefill as FFNPrefill, Decode as FFNDecode
 from software_model.MLA import Prefill as MLAPrefill, Decode as MLADecode
+from software_model.embedding import Embedding 
+from software_model.LMhead import LMhead
 from utils import DataType, Tensor, data_type_dict
 from hardware_model.device import device_dict
 from power import get_global_power_counter
@@ -29,6 +31,7 @@ class ModelConfig:
         # 通用参数
         self.hidden_size = kwargs.get('hidden_size', 5120)
         self.datatype = kwargs.get('datatype', data_type_dict["fp8"])
+        self.vocab_size = kwargs.get('vocab_size', 32000)
         
         # GQA参数
         self.head_dim = kwargs.get('head_dim', 128)
@@ -152,6 +155,11 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
 
     # Prefill
     prefill_model = FlexibleModel(model_config, stage="prefill")
+    
+    # Initialize Embedding and LMhead
+    embedding_op = Embedding(device, model_config.vocab_size, hidden_size, datatype)
+    lmhead_op = LMhead(device, model_config.vocab_size, hidden_size, datatype)
+
     prompt = Tensor([micro_batch, prefill_lenth, hidden_size], data_type=datatype)
     _ = prefill_model(prompt)
     prefill_operator_latency_all = []
@@ -159,6 +167,16 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
     total_prefill_cycles = 0.0
     total_prefill_compute_cycles = 0.0
     total_prefill_comm_cycles = 0.0
+
+    # Embedding (Prefill)
+    emb_input = Tensor([micro_batch, prefill_lenth, model_config.vocab_size], datatype)
+    _ = embedding_op(emb_input)
+    emb_lat, emb_total, emb_energy = embedding_op.mapping_and_simulate(device, layer_id=-1, micro_batch_id=0)
+    prefill_operator_latency_all.extend(emb_lat)
+    prefill_operator_energy_all.extend(emb_energy)
+    total_prefill_cycles += emb_total
+    total_prefill_compute_cycles += sum(x['计算延时'] for x in emb_lat if '计算延时' in x)
+
     for chip in range(device.n_chip):
         for layer in range(n_layers_per_chip):
             lat_list, layer_total, energy_list = prefill_model.run_one_layer(device, layer_id=layer, micro_batch_id=chip, n_layers_per_chip=n_layers_per_chip)
@@ -167,6 +185,15 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
             total_prefill_cycles += layer_total
             total_prefill_compute_cycles += sum(x['计算延时'] for x in lat_list if '计算延时' in x)
             total_prefill_comm_cycles += sum(x['通信延时'] for x in lat_list if '通信延时' in x)
+
+    # LMhead (Prefill)
+    lm_input = Tensor([micro_batch, prefill_lenth, hidden_size], datatype)
+    _ = lmhead_op(lm_input)
+    lm_lat, lm_total, lm_energy = lmhead_op.mapping_and_simulate(device, layer_id=model_config.layer_count, micro_batch_id=device.n_chip-1)
+    prefill_operator_latency_all.extend(lm_lat)
+    prefill_operator_energy_all.extend(lm_energy)
+    total_prefill_cycles += lm_total
+    total_prefill_compute_cycles += sum(x['计算延时'] for x in lm_lat if '计算延时' in x)
 
     total_prefill_ms = total_prefill_cycles / (device.frequency * 1e6) * 1e3
     total_prefill_compute_ms = total_prefill_compute_cycles / (device.frequency * 1e6) * 1e3
@@ -272,6 +299,16 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
         step_compute_cycles = 0.0
         step_comm_cycles = 0.0
         step_total_cycles = 0.0
+
+        # Embedding (Decode)
+        emb_input = Tensor([micro_batch, 1, model_config.vocab_size], datatype)
+        _ = embedding_op(emb_input)
+        emb_lat, emb_total, emb_energy = embedding_op.mapping_and_simulate(device, layer_id=-1, micro_batch_id=0)
+        step_lat_list_all.extend(emb_lat)
+        step_energy_list_all.extend(emb_energy)
+        step_total_cycles += emb_total
+        step_compute_cycles += sum(x['计算延时'] for x in emb_lat if '计算延时' in x)
+
         for chip in range(device.n_chip):
             for layer in range(n_layers_per_chip):
                 lat_list, layer_total, energy_list = decode_model.run_one_layer(device, layer_id=layer, micro_batch_id=chip, n_layers_per_chip=n_layers_per_chip)
@@ -280,6 +317,15 @@ def collect_model_data(model_config, device, batch_size, prefill_lenth, decode_l
                 step_total_cycles += layer_total
                 step_compute_cycles += sum(x['计算延时'] for x in lat_list if '计算延时' in x)
                 step_comm_cycles += sum(x['通信延时'] for x in lat_list if '通信延时' in x)
+
+        # LMhead (Decode)
+        lm_input = Tensor([micro_batch, 1, hidden_size], datatype)
+        _ = lmhead_op(lm_input)
+        lm_lat, lm_total, lm_energy = lmhead_op.mapping_and_simulate(device, layer_id=model_config.layer_count, micro_batch_id=device.n_chip-1)
+        step_lat_list_all.extend(lm_lat)
+        step_energy_list_all.extend(lm_energy)
+        step_total_cycles += lm_total
+        step_compute_cycles += sum(x['计算延时'] for x in lm_lat if '计算延时' in x)
 
         # per-step operator latency rows — 聚合相同算子在不同层与不同micro-batch的延时
         step_op_cycles = {}

@@ -148,7 +148,7 @@ class Prefill:
         t, last_bytes = measure('moe_add', self.moe_add, comm_zero, experts, layer_id=layer_id, micro_batch_id=micro_batch_id)
         total_latency += t
 
-        if( (layer_id +1) % n_layers_per_chip ==0):
+        if( (layer_id +1) % n_layers_per_chip ==0 and device.n_chip >1):
             pipeline_latency = concat(device, last_bytes) + p2p(device, last_bytes) + scatter(device, last_bytes)
             operator_latency.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, '总延时': pipeline_latency})
             total_latency += pipeline_latency
@@ -287,7 +287,7 @@ class Decode:
         t, last_bytes = measure('moe_add', self.moe_add, comm_zero, experts, layer_id=layer_id, micro_batch_id=micro_batch_id)
         total_latency += t
 
-        if( (layer_id +1) % n_layers_per_chip ==0):
+        if( (layer_id +1) % n_layers_per_chip ==0 and device.n_chip >1):
             pipeline_latency = concat(device, last_bytes) + p2p(device, last_bytes) + scatter(device, last_bytes)
             operator_latency.append({'operator': 'pipeline_communication', 'micro_batch_id': micro_batch_id, '总延时': pipeline_latency})
             total_latency += pipeline_latency
